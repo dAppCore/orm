@@ -1,0 +1,732 @@
+// SPDX-License-Identifier: EUPL-1.2
+
+// Embedded assets for the Core framework.
+//
+// Embed provides scoped filesystem access for go:embed and any FS.
+// Also includes build-time asset packing (AST scanner + compressor)
+// and template-based directory extraction.
+//
+// Usage (mount):
+//
+//	sub, _ := core.Mount(myFS, "lib/persona")
+//	content, _ := sub.ReadString("secops/developer.md")
+//
+// Usage (extract):
+//
+//	core.Extract(fsys, "/tmp/workspace", data)
+//
+// Usage (pack):
+//
+//	refs, _ := core.ScanAssets([]string{"main.go"})
+//	source, _ := core.GeneratePack(refs)
+package core
+
+import (
+	"compress/gzip"
+	"embed"
+	"go/ast"
+	"go/parser"
+	"go/token"
+)
+
+// EmbedFS is embed.FS re-exported for tests and consumers using go:embed.
+//
+//	var assets core.EmbedFS
+//	_ = assets
+type EmbedFS = embed.FS
+
+// --- Runtime: Asset Registry ---
+
+// AssetGroup holds a named collection of packed assets.
+//
+//	core.AddAsset("agent", "persona/developer.md", "H4sIAAAAAAAA/8pIzcnJBwCGphA2BQAAAA==")
+//	r := core.GetAsset("agent", "persona/developer.md")
+//	_ = r
+type AssetGroup struct {
+	assets map[string]string // name → compressed data
+}
+
+var (
+	assetGroups   = make(map[string]*AssetGroup)
+	assetGroupsMu RWMutex
+)
+
+// AddAsset registers a packed asset at runtime (called from generated init()).
+//
+//	core.AddAsset("agent", "persona/developer.md", "H4sIAAAAAAAA/8pIzcnJBwCGphA2BQAAAA==")
+func AddAsset(group, name, data string) {
+	assetGroupsMu.Lock()
+	defer assetGroupsMu.Unlock()
+
+	g, ok := assetGroups[group]
+	if !ok {
+		g = &AssetGroup{assets: make(map[string]string)}
+		assetGroups[group] = g
+	}
+	g.assets[name] = data
+}
+
+// GetAsset retrieves and decompresses a packed asset.
+//
+//	r := core.GetAsset("mygroup", "greeting")
+//	if r.OK { content := r.Value.(string) }
+func GetAsset(group, name string) Result {
+	assetGroupsMu.RLock()
+	g, ok := assetGroups[group]
+	if !ok {
+		assetGroupsMu.RUnlock()
+		return Result{}
+	}
+	data, ok := g.assets[name]
+	assetGroupsMu.RUnlock()
+	if !ok {
+		return Result{}
+	}
+	s, err := decompress(data)
+	if err != nil {
+		return Result{err, false}
+	}
+	return Result{s, true}
+}
+
+// GetAssetBytes retrieves a packed asset as bytes.
+//
+//	r := core.GetAssetBytes("mygroup", "file")
+//	if r.OK { data := r.Value.([]byte) }
+func GetAssetBytes(group, name string) Result {
+	r := GetAsset(group, name)
+	if !r.OK {
+		return r
+	}
+	return Result{[]byte(r.Value.(string)), true}
+}
+
+// --- Build-time: AST Scanner ---
+
+// AssetRef is a reference to an asset found in source code.
+//
+//	ref := core.AssetRef{Name: "developer.md", Group: "persona", Path: "persona/developer.md"}
+//	core.Println(ref.Path)
+type AssetRef struct {
+	Name     string
+	Path     string
+	Group    string
+	FullPath string
+}
+
+// ScannedPackage holds all asset references from a set of source files.
+//
+//	pkg := core.ScannedPackage{PackageName: "agent", BaseDirectory: "./agent"}
+//	pkg.Assets = append(pkg.Assets, core.AssetRef{Name: "developer.md", Group: "persona"})
+type ScannedPackage struct {
+	PackageName   string
+	BaseDirectory string
+	Groups        []string
+	Assets        []AssetRef
+}
+
+// ScanAssets parses Go source files and finds asset references.
+// Looks for calls to: core.GetAsset("group", "name"), core.AddAsset, etc.
+//
+//	r := core.ScanAssets([]string{"cmd/agent/main.go"})
+//	if !r.OK {
+//	    return r
+//	}
+//	pkgs := r.Value.([]core.ScannedPackage)
+//	_ = pkgs
+func ScanAssets(filenames []string) Result {
+	packageMap := make(map[string]*ScannedPackage)
+	var scanErr error
+
+	for _, filename := range filenames {
+		fset := token.NewFileSet()
+		node, err := parser.ParseFile(fset, filename, nil, parser.AllErrors)
+		if err != nil {
+			return Result{err, false}
+		}
+
+		baseDir := PathDir(filename)
+		pkg, ok := packageMap[baseDir]
+		if !ok {
+			pkg = &ScannedPackage{BaseDirectory: baseDir}
+			packageMap[baseDir] = pkg
+		}
+		pkg.PackageName = node.Name.Name
+
+		ast.Inspect(node, func(n ast.Node) bool {
+			if scanErr != nil {
+				return false
+			}
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+
+			ident, ok := sel.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+
+			// Look for core.GetAsset or mewn.String patterns
+			if ident.Name == "core" || ident.Name == "mewn" {
+				switch sel.Sel.Name {
+				case "GetAsset", "GetAssetBytes", "String", "MustString", "Bytes", "MustBytes":
+					if len(call.Args) >= 1 {
+						if lit, ok := call.Args[len(call.Args)-1].(*ast.BasicLit); ok {
+							path := TrimPrefix(TrimSuffix(lit.Value, "\""), "\"")
+							group := "."
+							if len(call.Args) >= 2 {
+								if glit, ok := call.Args[0].(*ast.BasicLit); ok {
+									group = TrimPrefix(TrimSuffix(glit.Value, "\""), "\"")
+								}
+							}
+							fullPath := PathAbs(PathJoin(baseDir, group, path))
+							if !fullPath.OK {
+								err, _ := fullPath.Value.(error)
+								scanErr = Wrap(err, "core.ScanAssets", Join(" ", "could not determine absolute path for asset", path, "in group", group))
+								return false
+							}
+							pkg.Assets = append(pkg.Assets, AssetRef{
+								Name: path,
+
+								Group:    group,
+								FullPath: fullPath.Value.(string),
+							})
+						}
+					}
+				case "Group":
+					// Variable assignment: g := core.Group("./assets")
+					if len(call.Args) == 1 {
+						if lit, ok := call.Args[0].(*ast.BasicLit); ok {
+							path := TrimPrefix(TrimSuffix(lit.Value, "\""), "\"")
+							fullPath := PathAbs(PathJoin(baseDir, path))
+							if !fullPath.OK {
+								err, _ := fullPath.Value.(error)
+								scanErr = Wrap(err, "core.ScanAssets", Join(" ", "could not determine absolute path for group", path))
+								return false
+							}
+							pkg.Groups = append(pkg.Groups, fullPath.Value.(string))
+							// Track for variable resolution
+						}
+					}
+				}
+			}
+
+			return true
+		})
+		if scanErr != nil {
+			return Result{scanErr, false}
+		}
+	}
+
+	var result []ScannedPackage
+	for _, pkg := range packageMap {
+		result = append(result, *pkg)
+	}
+	return Result{result, true}
+}
+
+// GeneratePack creates Go source code that embeds the scanned assets.
+//
+//	pkg := core.ScannedPackage{PackageName: "agent", BaseDirectory: "./agent"}
+//	r := core.GeneratePack(pkg)
+//	if !r.OK { return r }
+//	source := r.Value.(string)
+//	core.Println(source)
+func GeneratePack(pkg ScannedPackage) Result {
+	b := NewBuilder()
+
+	b.WriteString(Sprintf("package %s\n\n", pkg.PackageName))
+	b.WriteString("// Code generated by core pack. DO NOT EDIT.\n\n")
+
+	if len(pkg.Assets) == 0 && len(pkg.Groups) == 0 {
+		return Result{b.String(), true}
+	}
+
+	b.WriteString("import \"dappco.re/go\"\n\n")
+	b.WriteString("func init() {\n")
+
+	// Pack groups (entire directories)
+	packed := make(map[string]bool)
+	for _, groupPath := range pkg.Groups {
+		files, err := getAllFiles(groupPath)
+		if err != nil {
+			return Result{err, false}
+		}
+		for _, file := range files {
+			if packed[file] {
+				continue
+			}
+			data, err := compressFile(file)
+			if err != nil {
+				return Result{err, false}
+			}
+			localPath := TrimPrefix(file, groupPath+"/")
+			relGroup := PathRel(pkg.BaseDirectory, groupPath)
+			if !relGroup.OK {
+				return relGroup
+			}
+			b.WriteString(Sprintf("\tcore.AddAsset(%q, %q, %q)\n", relGroup.Value.(string), localPath, data))
+			packed[file] = true
+		}
+	}
+
+	// Pack individual assets
+	for _, asset := range pkg.Assets {
+		if packed[asset.FullPath] {
+			continue
+		}
+		data, err := compressFile(asset.FullPath)
+		if err != nil {
+			return Result{err, false}
+		}
+		b.WriteString(Sprintf("\tcore.AddAsset(%q, %q, %q)\n", asset.Group, asset.Name, data))
+		packed[asset.FullPath] = true
+	}
+
+	b.WriteString("}\n")
+	return Result{b.String(), true}
+}
+
+// --- Compression ---
+
+func compressFile(path string) (string, error) {
+	r := ReadFile(path)
+	if !r.OK {
+		return "", r.Value.(error)
+	}
+	return compress(string(r.Value.([]byte)))
+}
+
+func compress(input string) (string, error) {
+	buf := NewBuffer()
+	gz, err := gzip.NewWriterLevel(buf, gzip.BestCompression)
+	if err != nil {
+		return "", err
+	}
+	if _, err := gz.Write([]byte(input)); err != nil {
+		_ = gz.Close()
+		return "", err
+	}
+	if err := gz.Close(); err != nil {
+		return "", err
+	}
+	return Base64Encode(buf.Bytes()), nil
+}
+
+func decompress(input string) (string, error) {
+	data := Base64Decode(input)
+	if !data.OK {
+		return "", data.Value.(error)
+	}
+	gz, err := gzip.NewReader(NewBuffer(data.Value.([]byte)))
+	if err != nil {
+		return "", err
+	}
+
+	r := ReadAll(gz)
+	if !r.OK {
+		return "", r.Value.(error)
+	}
+	return r.Value.(string), nil
+}
+
+func getAllFiles(dir string) ([]string, error) {
+	var result []string
+	err := PathWalkDir(dir, func(path string, d FsDirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			result = append(result, path)
+		}
+		return nil
+	})
+	return result, err
+}
+
+// --- Embed: Scoped Filesystem Mount ---
+
+// Embed wraps an FS with a basedir for scoped access.
+// All paths are relative to basedir.
+//
+//	r := core.Mount(core.DirFS("testdata"), "prompts")
+//	if !r.OK { return r }
+//	emb := r.Value.(*core.Embed)
+//	core.Println(emb.BaseDirectory())
+type Embed struct {
+	basedir string
+	fsys    FS
+	embedFS *embed.FS // original embed.FS for type-safe access via EmbedFS()
+}
+
+// Mount creates a scoped view of an FS anchored at basedir.
+//
+//	r := core.Mount(myFS, "lib/prompts")
+//	if r.OK { emb := r.Value.(*Embed) }
+func Mount(fsys FS, basedir string) Result {
+	s := &Embed{fsys: fsys, basedir: basedir}
+
+	if efs, ok := fsys.(embed.FS); ok {
+		s.embedFS = &efs
+	}
+
+	if r := s.ReadDir("."); !r.OK {
+		return r
+	}
+	return Result{s, true}
+}
+
+// MountEmbed creates a scoped view of an embed.FS.
+//
+//	r := core.MountEmbed(myFS, "testdata")
+func MountEmbed(efs embed.FS, basedir string) Result {
+	return Mount(efs, basedir)
+}
+
+func (s *Embed) path(name string) Result {
+	joined := PathToSlash(PathJoin(s.basedir, name))
+	if HasPrefix(joined, "..") || Contains(joined, "/../") || HasSuffix(joined, "/..") {
+		return Result{E("embed.path", Concat("path traversal rejected: ", name), nil), false}
+	}
+	return Result{joined, true}
+}
+
+// Open opens the named file for reading.
+//
+//	r := emb.Open("test.txt")
+//	if r.OK { file := r.Value.(core.FsFile); _ = file }
+func (s *Embed) Open(name string) Result {
+	r := s.path(name)
+	if !r.OK {
+		return r
+	}
+	f, err := s.fsys.Open(r.Value.(string))
+	if err != nil {
+		return Result{err, false}
+	}
+	return Result{f, true}
+}
+
+// ReadDir reads the named directory.
+//
+//	r := core.Mount(core.DirFS("testdata"), "prompts")
+//	if !r.OK { return r }
+//	emb := r.Value.(*core.Embed)
+//	entries := emb.ReadDir(".")
+//	if !entries.OK { return entries }
+func (s *Embed) ReadDir(name string) Result {
+	r := s.path(name)
+	if !r.OK {
+		return r
+	}
+	return ReadDir(s.fsys, r.Value.(string))
+}
+
+// ReadFile reads the named file.
+//
+//	r := emb.ReadFile("test.txt")
+//	if r.OK { data := r.Value.([]byte) }
+func (s *Embed) ReadFile(name string) Result {
+	r := s.path(name)
+	if !r.OK {
+		return r
+	}
+	return ReadFSFile(s.fsys, r.Value.(string))
+}
+
+// ReadString reads the named file as a string.
+//
+//	r := emb.ReadString("test.txt")
+//	if r.OK { content := r.Value.(string) }
+func (s *Embed) ReadString(name string) Result {
+	r := s.ReadFile(name)
+	if !r.OK {
+		return r
+	}
+	return Result{string(r.Value.([]byte)), true}
+}
+
+// Sub returns a new Embed anchored at a subdirectory within this mount.
+//
+//	r := emb.Sub("testdata")
+//	if r.OK { sub := r.Value.(*Embed) }
+func (s *Embed) Sub(subDir string) Result {
+	r := s.path(subDir)
+	if !r.OK {
+		return r
+	}
+	sub := Sub(s.fsys, r.Value.(string))
+	if !sub.OK {
+		return sub
+	}
+	return Result{&Embed{fsys: sub.Value.(FS), basedir: "."}, true}
+}
+
+// FS returns the underlying FS.
+//
+//	r := core.Mount(core.DirFS("testdata"), "prompts")
+//	if !r.OK { return r }
+//	emb := r.Value.(*core.Embed)
+//	fsys := emb.FS()
+//	_ = fsys
+func (s *Embed) FS() FS {
+	return s.fsys
+}
+
+// EmbedFS returns the underlying embed.FS if mounted from one.
+// Returns zero embed.FS if mounted from a non-embed source.
+//
+//	var assets embed.FS
+//	r := core.MountEmbed(assets, "locales")
+//	if r.OK {
+//	    emb := r.Value.(*core.Embed)
+//	    _ = emb.EmbedFS()
+//	}
+func (s *Embed) EmbedFS() embed.FS {
+	if s.embedFS != nil {
+		return *s.embedFS
+	}
+	return embed.FS{}
+}
+
+// BaseDirectory returns the base directory this Embed is anchored at.
+//
+//	r := core.Mount(core.DirFS("testdata"), "prompts")
+//	if !r.OK { return r }
+//	emb := r.Value.(*core.Embed)
+//	base := emb.BaseDirectory()
+//	core.Println(base)
+func (s *Embed) BaseDirectory() string {
+	return s.basedir
+}
+
+// --- Template Extraction ---
+
+// ExtractOptions configures template extraction.
+//
+//	opts := core.ExtractOptions{
+//	    TemplateFilters: []string{".tmpl"},
+//	    RenameFiles: map[string]string{"README.tmpl": "README.md"},
+//	}
+//	_ = opts
+type ExtractOptions struct {
+	// TemplateFilters identifies template files by substring match.
+	// Default: [".tmpl"]
+	TemplateFilters []string
+
+	// IgnoreFiles is a set of filenames to skip during extraction.
+	IgnoreFiles map[string]struct{}
+
+	// RenameFiles maps original filenames to new names.
+	RenameFiles map[string]string
+}
+
+// Extract copies a template directory from an FS to targetDir,
+// processing Go text/template in filenames and file contents.
+//
+// Files containing a template filter substring (default: ".tmpl") have
+// their contents processed through text/template with the given data.
+// The filter is stripped from the output filename.
+//
+// Directory and file names can contain Go template expressions:
+// {{.Name}}/main.go → myproject/main.go
+//
+// Data can be any struct or map[string]string for template substitution.
+//
+//	fsys := core.DirFS("templates/agent")
+//	data := map[string]string{"Name": "homelab"}
+//	r := core.Extract(fsys, "/tmp/agent-workspace", data)
+//	if !r.OK { return r }
+func Extract(fsys FS, targetDir string, data any, opts ...ExtractOptions) Result {
+	opt := ExtractOptions{
+		TemplateFilters: []string{".tmpl"},
+		IgnoreFiles:     make(map[string]struct{}),
+		RenameFiles:     make(map[string]string),
+	}
+	if len(opts) > 0 {
+		if len(opts[0].TemplateFilters) > 0 {
+			opt.TemplateFilters = opts[0].TemplateFilters
+		}
+		if opts[0].IgnoreFiles != nil {
+			opt.IgnoreFiles = opts[0].IgnoreFiles
+		}
+		if opts[0].RenameFiles != nil {
+			opt.RenameFiles = opts[0].RenameFiles
+		}
+	}
+
+	// Ensure target directory exists
+	absTargetDir := PathAbs(targetDir)
+	if !absTargetDir.OK {
+		return absTargetDir
+	}
+	targetDir = absTargetDir.Value.(string)
+	if r := MkdirAll(targetDir, 0755); !r.OK {
+		return r
+	}
+
+	// Categorise files
+	var dirs []string
+	var templateFiles []string
+	var standardFiles []string
+	var err error
+
+	err = WalkDir(fsys, ".", func(path string, d FsDirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == "." {
+			return nil
+		}
+		if d.IsDir() {
+			dirs = append(dirs, path)
+			return nil
+		}
+		filename := PathBase(path)
+		if _, ignored := opt.IgnoreFiles[filename]; ignored {
+			return nil
+		}
+		if isTemplate(filename, opt.TemplateFilters) {
+			templateFiles = append(templateFiles, path)
+		} else {
+			standardFiles = append(standardFiles, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return Result{err, false}
+	}
+
+	// safePath ensures a rendered path stays under targetDir.
+	safePath := func(rendered string) (string, error) {
+		absResult := PathAbs(rendered)
+		if !absResult.OK {
+			return "", absResult.Value.(error)
+		}
+		abs := absResult.Value.(string)
+		if !HasPrefix(abs, targetDir+string(PathSeparator)) && abs != targetDir {
+			return "", E("embed.Extract", Concat("path escapes target: ", abs), nil)
+		}
+		return abs, nil
+	}
+
+	// Create directories (names may contain templates)
+	for _, dir := range dirs {
+		target, err := safePath(renderPath(PathJoin(targetDir, dir), data))
+		if err != nil {
+			return Result{err, false}
+		}
+		if r := MkdirAll(target, 0755); !r.OK {
+			return r
+		}
+	}
+
+	// Process template files
+	for _, path := range templateFiles {
+		tmplResult := ParseTemplateFS(fsys, path)
+		if !tmplResult.OK {
+			return tmplResult
+		}
+		tmpl := tmplResult.Value.(*Template)
+
+		targetFile := renderPath(PathJoin(targetDir, path), data)
+
+		// Strip template filters from filename
+		dir := PathDir(targetFile)
+		name := PathBase(targetFile)
+		for _, filter := range opt.TemplateFilters {
+			name = Replace(name, filter, "")
+		}
+		if renamed := opt.RenameFiles[name]; renamed != "" {
+			name = renamed
+		}
+		targetFile, err = safePath(PathJoin(dir, name))
+		if err != nil {
+			return Result{err, false}
+		}
+
+		r := Create(targetFile)
+		if !r.OK {
+			return r
+		}
+		f := r.Value.(*OSFile)
+		if executed := ExecuteTemplate(tmpl, f, data); !executed.OK {
+			f.Close()
+			return executed
+		}
+		f.Close()
+	}
+
+	// Copy standard files
+	for _, path := range standardFiles {
+		targetPath := path
+		name := PathBase(path)
+		if renamed := opt.RenameFiles[name]; renamed != "" {
+			targetPath = PathJoin(PathDir(path), renamed)
+		}
+		target, err := safePath(renderPath(PathJoin(targetDir, targetPath), data))
+		if err != nil {
+			return Result{err, false}
+		}
+		if err := copyFile(fsys, path, target); err != nil {
+			return Result{err, false}
+		}
+	}
+
+	return Result{OK: true}
+}
+
+func isTemplate(filename string, filters []string) bool {
+	for _, f := range filters {
+		if Contains(filename, f) {
+			return true
+		}
+	}
+	return false
+}
+
+func renderPath(path string, data any) string {
+	if data == nil {
+		return path
+	}
+	tmplResult := ParseTemplate("path", path)
+	if !tmplResult.OK {
+		return path
+	}
+	buf := NewBuffer()
+	if executed := ExecuteTemplate(tmplResult.Value.(*Template), buf, data); !executed.OK {
+		return path
+	}
+	return buf.String()
+}
+
+func copyFile(fsys FS, source, target string) error {
+	s, err := fsys.Open(source)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+
+	if r := MkdirAll(PathDir(target), 0755); !r.OK {
+		return r.Value.(error)
+	}
+
+	r := Create(target)
+	if !r.OK {
+		return r.Value.(error)
+	}
+	d := r.Value.(*OSFile)
+	defer d.Close()
+
+	copied := Copy(d, s)
+	if !copied.OK {
+		return copied.Value.(error)
+	}
+	return nil
+}

@@ -1,0 +1,16 @@
+go 1.26.0
+
+// Workspace declarations replace the need for `replace` directives in
+// individual go.mod files. Candidates can build the orm module against
+// the bundled core/go without touching go.mod files.
+//
+//   cd /path/to/orm
+//   go build ./go/...
+//
+// To work outside the workspace (production module-mode), use
+// `GOWORK=off` and ensure dappco.re/go is reachable via GOPROXY.
+
+use (
+	./externals/core-go
+	./go
+)

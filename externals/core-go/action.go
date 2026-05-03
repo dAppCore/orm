@@ -1,0 +1,319 @@
+// SPDX-License-Identifier: EUPL-1.2
+
+// Named action system for the Core framework.
+// Actions are the atomic unit of work — named, registered, invokable,
+// and inspectable. The Action registry IS the capability map.
+//
+// Register a named action:
+//
+//	c.Action("git.log", func(ctx Context, opts core.Options) core.Result {
+//	    dir := opts.String("dir")
+//	    return c.Process().RunIn(ctx, dir, "git", "log")
+//	})
+//
+// Invoke by name:
+//
+//	r := c.Action("git.log").Run(ctx, core.NewOptions(
+//	    core.Option{Key: "dir", Value: "/path/to/repo"},
+//	))
+//
+// Check capability:
+//
+//	if c.Action("process.run").Exists() { ... }
+//
+// List all:
+//
+//	names := c.Actions()  // ["process.run", "agentic.dispatch", ...]
+package core
+
+// ActionHandler is the function signature for all named actions.
+//
+//	func(ctx Context, opts core.Options) core.Result
+type ActionHandler func(Context, Options) Result
+
+// Action is a registered named action.
+//
+//	action := c.Action("process.run")
+//	action.Description  // "Execute a command"
+//	action.Schema       // expected input keys
+type Action struct {
+	Name        string
+	Handler     ActionHandler
+	Description string
+	Schema      Options // declares expected input keys (optional)
+	enabled     bool
+	core        *Core // for entitlement checks during Run()
+}
+
+// Run executes the action with panic recovery.
+// Returns Result{OK: false} if the action has no handler (not registered).
+//
+//	r := c.Action("process.run").Run(ctx, opts)
+func (a *Action) Run(ctx Context, opts Options) (result Result) {
+	if a == nil || a.Handler == nil {
+		return Result{E("action.Run", Concat("action not registered: ", a.safeName()), nil), false}
+	}
+	if !a.enabled {
+		return Result{E("action.Run", Concat("action disabled: ", a.Name), nil), false}
+	}
+	// Entitlement check — permission boundary
+	if a.core != nil {
+		if e := a.core.Entitled(a.Name); !e.Allowed {
+			return Result{E("action.Run", Concat("not entitled: ", a.Name, " — ", e.Reason), nil), false}
+		}
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			result = Result{E("action.Run", Sprint("panic in action ", a.Name, ": ", r), nil), false}
+		}
+	}()
+	return a.Handler(ctx, opts)
+}
+
+// Exists returns true if this action has a registered handler.
+//
+//	if c.Action("process.run").Exists() { ... }
+func (a *Action) Exists() bool {
+	return a != nil && a.Handler != nil
+}
+
+// Enable marks the action as runnable. Actions are enabled at
+// registration time; use this to re-enable an action that was
+// previously disabled. No-op when the action has no handler.
+//
+//	c.Action("process.run").Enable()
+func (a *Action) Enable() {
+	if a == nil || a.Handler == nil {
+		return
+	}
+	a.enabled = true
+}
+
+// Disable marks the action as soft-disabled. Run() returns
+// Result{OK: false} with Code "action.disabled" until Enable is
+// called. The handler stays registered so the capability is
+// queryable but cannot fire.
+//
+//	c.Action("dangerous.purge").Disable()  // re-enable later via .Enable()
+func (a *Action) Disable() {
+	if a == nil || a.Handler == nil {
+		return
+	}
+	a.enabled = false
+}
+
+// Enabled reports whether the action will run when invoked.
+//
+//	if c.Action("process.run").Enabled() { ... }
+func (a *Action) Enabled() bool {
+	return a != nil && a.Handler != nil && a.enabled
+}
+
+func (a *Action) safeName() string {
+	if a == nil {
+		return "<nil>"
+	}
+	return a.Name
+}
+
+// --- Core accessor ---
+
+// Action gets or registers a named action.
+// With a handler argument: registers the action.
+// Without: returns the action for invocation.
+//
+//	c.Action("process.run", handler)           // register
+//	c.Action("process.run").Run(ctx, opts)     // invoke
+//	c.Action("process.run").Exists()           // check
+func (c *Core) Action(name string, handler ...ActionHandler) *Action {
+	if len(handler) > 0 {
+		def := &Action{Name: name, Handler: handler[0], enabled: true, core: c}
+		c.ipc.actions.Set(name, def)
+		return def
+	}
+	r := c.ipc.actions.Get(name)
+	if !r.OK {
+		return &Action{Name: name} // no handler — Exists() returns false
+	}
+	return r.Value.(*Action)
+}
+
+// Actions returns all registered named action names in registration order.
+//
+//	names := c.Actions()  // ["process.run", "agentic.dispatch"]
+func (c *Core) Actions() []string {
+	return c.ipc.actions.Names()
+}
+
+// --- Task Composition ---
+
+// Step is a single step in a Task — references an Action by name.
+//
+//	core.Step{Action: "agentic.qa"}
+//	core.Step{Action: "agentic.poke", Async: true}
+//	core.Step{Action: "agentic.verify", Input: "previous"}
+type Step struct {
+	Action string  // name of the Action to invoke
+	With   Options // static options (merged with runtime opts)
+	Async  bool    // run in background, don't block
+	Input  string  // "previous" = output of last step piped as input
+}
+
+// Task is a named sequence of Steps.
+//
+//	c.Task("agent.completion", core.Task{
+//	    Steps: []core.Step{
+//	        {Action: "agentic.qa"},
+//	        {Action: "agentic.auto-pr"},
+//	        {Action: "agentic.verify"},
+//	        {Action: "agentic.poke", Async: true},
+//	    },
+//	})
+type Task struct {
+	Name        string
+	Description string
+	Steps       []Step
+}
+
+// Run executes the task's steps in order. Sync steps run sequentially —
+// if any fails, the chain stops. Async steps are dispatched and don't block.
+// The "previous" input pipes the last sync step's output to the next step.
+//
+//	r := c.Task("deploy").Run(ctx, opts)
+func (t *Task) Run(ctx Context, c *Core, opts Options) Result {
+	if t == nil || len(t.Steps) == 0 {
+		return Result{E("task.Run", Concat("task has no steps: ", t.safeName()), nil), false}
+	}
+
+	var lastResult Result
+	for _, step := range t.Steps {
+		// Use step's own options, or runtime options if step has none
+		stepOpts := stepOptions(step)
+		if stepOpts.Len() == 0 {
+			stepOpts = opts
+		}
+
+		// Pipe previous result as input
+		if step.Input == "previous" && lastResult.OK {
+			stepOpts.Set("_input", lastResult.Value)
+		}
+
+		action := c.Action(step.Action)
+		if !action.Exists() {
+			return Result{E("task.Run", Concat("action not found: ", step.Action), nil), false}
+		}
+
+		if step.Async {
+			// Fire and forget — don't block the chain
+			go func(a *Action, o Options) {
+				defer func() {
+					if r := recover(); r != nil {
+						Error("async task step panicked", "action", a.Name, "panic", r)
+					}
+				}()
+				a.Run(ctx, o)
+			}(action, stepOpts)
+			continue
+		}
+
+		lastResult = action.Run(ctx, stepOpts)
+		if !lastResult.OK {
+			return lastResult
+		}
+	}
+	return lastResult
+}
+
+func (t *Task) safeName() string {
+	if t == nil {
+		return "<nil>"
+	}
+	return t.Name
+}
+
+// mergeStepOptions returns the step's With options — runtime opts are passed directly.
+// Step.With provides static defaults that the step was registered with.
+func stepOptions(step Step) Options {
+	return step.With
+}
+
+// Task gets or registers a named task.
+// With a Task argument: registers the task.
+// Without: returns the task for invocation.
+//
+//	c.Task("deploy", core.Task{Steps: steps})  // register
+//	c.Task("deploy").Run(ctx, c, opts)             // invoke
+func (c *Core) Task(name string, def ...Task) *Task {
+	if len(def) > 0 {
+		d := def[0]
+		d.Name = name
+		c.ipc.tasks.Set(name, &d)
+		return &d
+	}
+	r := c.ipc.tasks.Get(name)
+	if !r.OK {
+		return &Task{Name: name}
+	}
+	return r.Value.(*Task)
+}
+
+// Tasks returns all registered task names.
+//
+//	c := core.New()
+//	names := c.Tasks()
+//	core.Println(core.Join(", ", names...))
+func (c *Core) Tasks() []string {
+	return c.ipc.tasks.Names()
+}
+
+// PerformAsync dispatches a named action in a background goroutine.
+// Broadcasts ActionTaskStarted, ActionTaskProgress, and ActionTaskCompleted
+// as IPC messages so other services can track progress.
+//
+//	r := c.PerformAsync("agentic.dispatch", opts)
+//	taskID := r.Value.(string)
+func (c *Core) PerformAsync(action string, opts Options) Result {
+	if c.shutdown.Load() {
+		return Result{}
+	}
+	taskID := ID()
+
+	c.ACTION(ActionTaskStarted{TaskIdentifier: taskID, Action: action, Options: opts})
+
+	c.waitGroup.Go(func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				c.ACTION(ActionTaskCompleted{
+					TaskIdentifier: taskID,
+					Action:         action,
+					Result:         Result{E("core.PerformAsync", Sprint("panic: ", rec), nil), false},
+				})
+			}
+		}()
+
+		r := c.Action(action).Run(Background(), opts)
+
+		c.ACTION(ActionTaskCompleted{
+			TaskIdentifier: taskID,
+			Action:         action,
+			Result:         r,
+		})
+	})
+
+	return Result{taskID, true}
+}
+
+// Progress broadcasts a progress update for a background task.
+//
+//	c.Progress(taskID, 0.5, "halfway done", "agentic.dispatch")
+func (c *Core) Progress(taskID string, progress float64, message string, action string) {
+	c.ACTION(ActionTaskProgress{
+		TaskIdentifier: taskID,
+		Action:         action,
+		Progress:       progress,
+		Message:        message,
+	})
+}
+
+// Registration methods (RegisterAction, RegisterActions)
+// are in ipc.go — registration is IPC's responsibility.

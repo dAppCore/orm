@@ -1,0 +1,28 @@
+# IDE/editor caches
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+
+# Go build artefacts
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.prof
+
+# Coverage reports
+coverage.txt
+coverage.html
+profile.cov
+
+# Sonar / linter caches
+.scannerwork/
+.golangci-cache/
+
+# Direnv / local env
+.envrc.local
+.env.local
