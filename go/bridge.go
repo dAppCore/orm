@@ -11,11 +11,12 @@ import (
 //
 //	res := orm.Of[User](c).Where("email","=","x@y").First()
 type Bridge[T any] struct {
-	c          *core.Core
-	readIntent ReadIntent
-	mediumName string
-	err        error
-	strict     bool
+	c            *core.Core
+	readIntent   ReadIntent
+	mediumName   string
+	err          error
+	strict       bool
+	singleResult bool // set by Find/First only; Limit(n) must not set this
 }
 
 // Where adds an AND predicate. Value passes through input.Apply per Schema.
@@ -226,6 +227,7 @@ func (b *Bridge[T]) Find(pk ...any) core.Result {
 		return core.Fail(b.err)
 	}
 	b.readIntent.PK = pk
+	b.singleResult = true
 	return b.dispatchRead()
 }
 
@@ -237,6 +239,7 @@ func (b *Bridge[T]) First() core.Result {
 		return core.Fail(b.err)
 	}
 	b.readIntent.Limit = 1
+	b.singleResult = true
 	return b.dispatchRead()
 }
 
@@ -417,8 +420,8 @@ func (b *Bridge[T]) dispatchRead() core.Result {
 		return withResultMeta(value, payload.Meta)
 	}
 
-	// Handle single result (Find/First)
-	if b.readIntent.PK != nil || b.readIntent.Limit == 1 {
+	// Handle single result (Find/First — not Limit(1).Get())
+	if b.singleResult {
 		rows, ok := payload.Data.([]map[string]any)
 		if !ok || len(rows) == 0 {
 			return core.Fail(core.NewCode("orm.notfound", "no matching row"))

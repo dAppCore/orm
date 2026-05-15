@@ -249,6 +249,77 @@ func TestBridge_Limit_Good(t *T) {
 	AssertEqual(t, 2, len(users))
 }
 
+// TestBridge_WhereLimit_Good — Where(=) + Limit(N).Get() returns at most N
+// matching rows as []T, not a single-T result and not notfound.
+// Regression for Mantis #1395: Limit(1) was incorrectly treated as the
+// First() single-result path, causing Where+Limit to return 0 rows via Get.
+func TestBridge_WhereLimit_Good(t *T) {
+	c, m := setupBridgeTest(t)
+	schema := BridgeUser{}.Schema()
+
+	for i := int64(1); i <= 3; i++ {
+		m.Write(c.Context(), orm.WriteIntent{Op: orm.OpInsert, Schema: schema, Rows: []any{
+			map[string]any{"ID": i, "Email": Sprintf("user%d@b.com", i), "Name": "user", "Active": true},
+		}})
+	}
+	// Non-matching row
+	m.Write(c.Context(), orm.WriteIntent{Op: orm.OpInsert, Schema: schema, Rows: []any{
+		map[string]any{"ID": int64(4), "Email": "other@b.com", "Name": "other", "Active": false},
+	}})
+
+	// Where alone — 3 matching rows.
+	res := orm.Of[BridgeUser](c).Where("Active", "=", true).Get()
+	AssertTrue(t, res.OK)
+	all, _ := Cast[[]BridgeUser](res)
+	AssertEqual(t, 3, len(all))
+
+	// Where + Limit(1) via Get — must return []T of length 1, not notfound.
+	res = orm.Of[BridgeUser](c).Where("Active", "=", true).Limit(1).Get()
+	AssertTrue(t, res.OK)
+	limited, _ := Cast[[]BridgeUser](res)
+	AssertEqual(t, 1, len(limited))
+	AssertTrue(t, limited[0].Active)
+
+	// Where + Limit(2) via Get — must return []T of length 2.
+	res = orm.Of[BridgeUser](c).Where("Active", "=", true).Limit(2).Get()
+	AssertTrue(t, res.OK)
+	two, _ := Cast[[]BridgeUser](res)
+	AssertEqual(t, 2, len(two))
+}
+
+// TestBridge_WhereLimit_Bad — Where with zero matches + Limit returns empty
+// []T (not notfound, not panic) — Get should tolerate empty gracefully.
+func TestBridge_WhereLimit_Bad(t *T) {
+	c, _ := setupBridgeTest(t)
+
+	res := orm.Of[BridgeUser](c).Where("Active", "=", true).Limit(1).Get()
+	AssertTrue(t, res.OK)
+	users, _ := Cast[[]BridgeUser](res)
+	AssertEqual(t, 0, len(users))
+}
+
+// TestBridge_WhereLimit_Ugly — First() with Limit already set by caller still
+// returns single-T and fails with notfound on zero rows (First semantics intact).
+func TestBridge_WhereLimit_Ugly(t *T) {
+	c, m := setupBridgeTest(t)
+	schema := BridgeUser{}.Schema()
+
+	m.Write(c.Context(), orm.WriteIntent{Op: orm.OpInsert, Schema: schema, Rows: []any{
+		map[string]any{"ID": int64(1), "Email": "a@b.com", "Name": "a", "Active": true},
+	}})
+
+	// First() returns T, not []T.
+	res := orm.Of[BridgeUser](c).Where("Active", "=", true).First()
+	AssertTrue(t, res.OK)
+	u, ok := Detail[BridgeUser](res)
+	AssertTrue(t, ok)
+	AssertEqual(t, "a@b.com", u.Email)
+
+	// First() on empty set returns notfound.
+	res = orm.Of[BridgeUser](c).Where("Active", "=", false).First()
+	AssertFalse(t, res.OK)
+}
+
 // Helper to extract typed data from a bridge Result
 func Detail[T any](r Result) (T, bool) {
 	val, _, ok := orm.Detail[T](r)
