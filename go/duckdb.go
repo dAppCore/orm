@@ -85,6 +85,35 @@ func (m *DuckDBMedium) Path() string {
 	return m.path
 }
 
+// Raw returns the underlying *sql.DB for cases where the Intent API
+// doesn't fit — raw SQL, CREATE VIEW over external sources, DuckDB
+// extensions like read_json_auto / read_parquet / FTS / EXPLAIN.
+// Nil on a nil receiver so callers can guard cleanly.
+//
+// Prefer Read / Write / Stream where the Intent shape covers the
+// query — Raw skips Medium's portability guarantees (the same call
+// won't run against Memium or future Mediums) and the Caps gate.
+// Use it when the workload is intrinsically DuckDB-shaped (live
+// views over JSONL, parquet scans, columnar analytics).
+//
+// Usage example:
+//
+//	d, r := orm.NewDuckDB("/path/to/orm.duckdb")
+//	if !r.OK { return r }
+//	db := d.Raw()
+//	if _, err := db.ExecContext(ctx,
+//	    `CREATE OR REPLACE VIEW r1 AS
+//	     SELECT * FROM read_json_auto(?, format='newline_delimited',
+//	         ignore_errors=true, union_by_name=true)`, glob); err != nil {
+//	    return core.Fail(err)
+//	}
+func (m *DuckDBMedium) Raw() *sql.DB {
+	if m == nil {
+		return nil
+	}
+	return m.conn
+}
+
 // Close releases the DuckDB connection. Safe on a nil receiver.
 func (m *DuckDBMedium) Close() core.Result {
 	if m == nil || m.conn == nil {
