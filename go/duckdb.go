@@ -29,9 +29,9 @@ import (
 	core "dappco.re/go"
 
 	// duckdb driver — pulled in transitively by go-store via the same
-	// go-duckdb-bindings dep. Adding it here makes the Medium usable
+	// duckdb-go-bindings dep. Adding it here makes the Medium usable
 	// without consumers needing to import the driver themselves.
-	_ "github.com/marcboeker/go-duckdb/v2"
+	_ "github.com/duckdb/duckdb-go/v2"
 )
 
 // DuckDBMedium implements Medium against a DuckDB *sql.DB connection.
