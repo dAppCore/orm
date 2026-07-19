@@ -77,6 +77,14 @@ func shapePredicates(schema Schema, preds []Predicate) core.Result {
 }
 
 func shapePredicateValue(field Field, op string, value any) core.Result {
+	// ColRef names a column ("compare to a column"), not a literal — the
+	// field-type shapers (int64, format validators, min/max…) have no
+	// business running against it. Pass it through untouched so the
+	// Medium's SQL builder can recognise it and emit a column reference
+	// instead of a bound parameter. See alias.go's Col() doc comment.
+	if _, isColRef := value.(ColRef); isColRef {
+		return core.Ok(value)
+	}
 	switch core.Lower(op) {
 	case "in", "not in":
 		values := valueSlice(value)

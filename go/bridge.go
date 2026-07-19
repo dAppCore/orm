@@ -26,18 +26,11 @@ func (b *Bridge[T]) Where(field, op string, value any) *Bridge[T] {
 	if b.err != nil {
 		return b
 	}
-	schema := b.schema()
-	f, ok := schema.FieldByName(field)
+	coercedValue, ok := b.coerceWhereValue(field, op, value)
 	if !ok {
-		b.err = core.NewCode("orm.input.field", "unknown field: "+field)
 		return b
 	}
-	coerced := shapePredicateValue(f, op, value)
-	if !coerced.OK {
-		b.err = resultError(coerced, "orm.input.coerce", "coercion failed for field: "+field)
-		return b
-	}
-	b.readIntent.Where = append(b.readIntent.Where, Predicate{Field: field, Op: op, Value: coerced.Value})
+	b.readIntent.Where = append(b.readIntent.Where, Predicate{Field: field, Op: op, Value: coercedValue})
 	return b
 }
 
@@ -48,19 +41,88 @@ func (b *Bridge[T]) OrWhere(field, op string, value any) *Bridge[T] {
 	if b.err != nil {
 		return b
 	}
-	schema := b.schema()
-	f, ok := schema.FieldByName(field)
+	coercedValue, ok := b.coerceWhereValue(field, op, value)
 	if !ok {
-		b.err = core.NewCode("orm.input.field", "unknown field: "+field)
 		return b
+	}
+	b.readIntent.Where = append(b.readIntent.Where, Predicate{Field: field, Op: op, Value: coercedValue, OR: true})
+	return b
+}
+
+// coerceWhereValue resolves field (via resolveField) and, unless
+// resolution says to skip coercion, runs value through shapePredicateValue.
+// Shared by Where/OrWhere so both apply identical alias-qualified-field and
+// Col()-value handling.
+func (b *Bridge[T]) coerceWhereValue(field, op string, value any) (any, bool) {
+	f, skip, ok := b.resolveField(field)
+	if !ok {
+		return nil, false
+	}
+	if skip {
+		return value, true
 	}
 	coerced := shapePredicateValue(f, op, value)
 	if !coerced.OK {
 		b.err = resultError(coerced, "orm.input.coerce", "coercion failed for field: "+field)
-		return b
+		return nil, false
 	}
-	b.readIntent.Where = append(b.readIntent.Where, Predicate{Field: field, Op: op, Value: coerced.Value, OR: true})
-	return b
+	return coerced.Value, true
+}
+
+// resolveField validates a Where/OrWhere/WhereNull/WhereNotNull field name
+// against the bridge's own Schema, extending validation to alias-qualified
+// names ("alias.column") once From(A{}) has moved the bridge into
+// multi-table mode:
+//
+//   - Unqualified, or qualified with the alias that maps to this bridge's
+//     own table: validated and coerced exactly as before (skip=false).
+//   - Qualified with a DIFFERENT declared alias whose Schema is also known
+//     to this Core (via RegisterSchema, or a prior Of[T] access that
+//     populated the schema cache): validated and coerced against THAT
+//     Schema's Field (skip=false).
+//   - Qualified with a declared alias whose Schema isn't known here (e.g.
+//     a raw table string with no matching Go model, or a Sub() alias):
+//     skip=true — best-effort pass-through, since this Bridge has no
+//     Field metadata to validate or coerce against; the Medium's own SQL
+//     engine is the source of truth for that column.
+//   - Qualified with an alias not present in From(A{}) at all: ok=false,
+//     orm.input.field (same family as an unknown plain field name).
+func (b *Bridge[T]) resolveField(field string) (f Field, skip bool, ok bool) {
+	schema := b.schema()
+	table, col, dotted := cutDotted(field)
+	if !dotted || len(b.readIntent.Alias) == 0 {
+		fld, exists := schema.FieldByName(field)
+		if !exists {
+			b.err = core.NewCode("orm.input.field", "unknown field: "+field)
+			return Field{}, false, false
+		}
+		return fld, false, true
+	}
+
+	participant, declared := b.readIntent.Alias[table]
+	if !declared {
+		b.err = core.NewCode("orm.input.field", "unknown alias: "+table)
+		return Field{}, false, false
+	}
+
+	tableName := aliasTableName(participant)
+	if tableName == schema.Name {
+		fld, exists := schema.FieldByName(col)
+		if !exists {
+			b.err = core.NewCode("orm.input.field", "unknown field: "+field)
+			return Field{}, false, false
+		}
+		return fld, false, true
+	}
+
+	if tableName != "" {
+		if foreign, r := schemaByName(b.c, tableName); r.OK {
+			if fld, exists := foreign.FieldByName(col); exists {
+				return fld, false, true
+			}
+		}
+	}
+	return Field{}, true, true
 }
 
 // WhereNotNull adds a "NOT NULL" predicate.
@@ -70,8 +132,7 @@ func (b *Bridge[T]) WhereNotNull(field string) *Bridge[T] {
 	if b.err != nil {
 		return b
 	}
-	if _, ok := b.schema().FieldByName(field); !ok {
-		b.err = core.NewCode("orm.input.field", "unknown field: "+field)
+	if _, _, ok := b.resolveField(field); !ok {
 		return b
 	}
 	b.readIntent.Where = append(b.readIntent.Where, Predicate{Field: field, Op: "not null"})
@@ -85,8 +146,7 @@ func (b *Bridge[T]) WhereNull(field string) *Bridge[T] {
 	if b.err != nil {
 		return b
 	}
-	if _, ok := b.schema().FieldByName(field); !ok {
-		b.err = core.NewCode("orm.input.field", "unknown field: "+field)
+	if _, _, ok := b.resolveField(field); !ok {
 		return b
 	}
 	b.readIntent.Where = append(b.readIntent.Where, Predicate{Field: field, Op: "null"})
@@ -375,8 +435,13 @@ func (b *Bridge[T]) dispatchRead() core.Result {
 		return mr
 	}
 	caps := medium.Caps()
-	if len(b.readIntent.Alias) > 0 && !caps.Aliases {
-		return core.Fail(core.NewCode("orm.aliases.unsupported", "medium does not support aliased FROM"))
+	if len(b.readIntent.Alias) > 0 {
+		if !caps.Aliases {
+			return core.Fail(core.NewCode("orm.aliases.unsupported", "medium does not support aliased FROM"))
+		}
+		if r := checkAliasCapabilities(caps, b.readIntent.Alias); !r.OK {
+			return r
+		}
 	}
 	degraded, capR := validateReadCapabilities(caps, b.readIntent)
 	if !capR.OK {

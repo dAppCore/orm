@@ -2,6 +2,10 @@
 
 package orm
 
+import (
+	"dappco.re/go"
+)
+
 // A is the alias map type — declares which tables (or sub-references) participate.
 type A map[string]any
 
@@ -59,8 +63,88 @@ type BridgeRef interface {
 	GetIntent() ReadIntent
 }
 
-// GetIntent returns the bridge's current ReadIntent.
+// cutDotted splits an "alias.column"-shaped reference at its first dot,
+// reporting whether one was found. The strings.Cut equivalent, spelled
+// via core.Index since this repo's vendored core-go snapshot predates
+// core.Cut.
+func cutDotted(s string) (before, after string, found bool) {
+	idx := core.Index(s, ".")
+	if idx < 0 {
+		return s, "", false
+	}
+	return s[:idx], s[idx+1:], true
+}
+
+// aliasTableName extracts the underlying table name from a From(A{})
+// participant, regardless of which of the three declared shapes (plain
+// string, JoinSpec, SubRef) it is. Shared by the bridge (field-reference
+// resolution in Where/OrWhere) and every SQL-shaped Medium (FROM-clause
+// construction) so both sides agree on what a given alias points at.
+// Empty for a participant type outside the declared vocabulary, or a
+// SubRef whose sub-builder carries no Schema.
+func aliasTableName(participant any) string {
+	switch v := participant.(type) {
+	case string:
+		return v
+	case JoinSpec:
+		return v.Table
+	case SubRef:
+		return v.Builder.Schema.Name
+	default:
+		return ""
+	}
+}
+
+// joinKindSupported reports whether caps declares support for kind.
+func joinKindSupported(caps JoinCaps, kind JoinKind) bool {
+	switch kind {
+	case JoinInner:
+		return caps.Inner
+	case JoinLeft:
+		return caps.Left
+	case JoinRight:
+		return caps.Right
+	case JoinFull:
+		return caps.Full
+	default:
+		return false
+	}
+}
+
+// checkAliasCapabilities validates each From(A{}) participant against the
+// Medium's declared JoinKinds / Subqueries capabilities. Mirrors the
+// existing top-level Aliases gate in dispatchRead: a participant the
+// Medium can't honour fails fast with a code naming which capability was
+// missing (RFC §8: orm.join.unsupported / orm.subquery.unsupported)
+// instead of silently building a query the Medium can't actually run.
+func checkAliasCapabilities(caps Capabilities, alias map[string]any) core.Result {
+	for _, participant := range alias {
+		switch v := participant.(type) {
+		case JoinSpec:
+			if !joinKindSupported(caps.JoinKinds, v.Kind) {
+				return core.Fail(ErrJoinUnsupported)
+			}
+		case SubRef:
+			if !caps.Subqueries {
+				return core.Fail(ErrSubqueryUnsupported)
+			}
+		}
+	}
+	return core.Ok(nil)
+}
+
+// GetIntent returns the bridge's current ReadIntent, resolving Schema
+// first if the bridge hasn't dispatched yet. Schema is normally only
+// populated inside dispatchRead at terminal-verb time (Get/Find/...) —
+// but Sub() and Union/Intersect/Except call GetIntent on a builder that
+// is handed over BEFORE any terminal verb runs, so without this a Sub()
+// participant would always carry an empty Schema.Name: no columns to
+// select, no table to query, the subquery unbuildable regardless of how
+// the SQL builder renders it.
 func (b *Bridge[T]) GetIntent() ReadIntent {
+	if b.readIntent.Schema.Name == "" {
+		b.readIntent.Schema = b.schema()
+	}
 	return b.readIntent
 }
 

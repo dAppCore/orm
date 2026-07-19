@@ -162,6 +162,16 @@ func (m *DuckDBMedium) registerTable(schema Schema) core.Result {
 // Caps reports the predicate / join / aggregate set DuckDB honours
 // server-side. Watch is unsupported; the bridge can degrade via
 // WatchPoll when consumers need real-time semantics.
+//
+// JoinKinds only claims Inner: From(A{}) wires plain-table and Sub()
+// participants into a comma-joined FROM with predicates carrying the join
+// condition (relational-algebra style, RFC §4.13) — that's an inner join.
+// LeftJoin/RightJoin/FullJoin need an explicit ON condition the alias
+// vocabulary doesn't carry yet, so they're honestly declared unsupported
+// (orm.join.unsupported) rather than silently emitted as an unconditional
+// join. SetOps is honestly false too: Union/Intersect/Except return a bare
+// BridgeRef with no Get()/Where(), so no typed Bridge call can ever
+// populate ReadIntent.SetOp — there's no reachable path to wire yet.
 func (m *DuckDBMedium) Caps() Capabilities {
 	return Capabilities{
 		Predicates: PredicateCaps{
@@ -181,8 +191,8 @@ func (m *DuckDBMedium) Caps() Capabilities {
 		WatchPoll:    true,
 		Aliases:      true,
 		Subqueries:   true,
-		SetOps:       true,
-		JoinKinds:    JoinCaps{Inner: true, Left: true, Right: true, Full: true},
+		SetOps:       false,
+		JoinKinds:    JoinCaps{Inner: true},
 	}
 }
 
@@ -196,18 +206,59 @@ func (m *DuckDBMedium) Read(ctx core.Context, in ReadIntent) core.Result {
 		return m.readAggregate(ctx, in, start)
 	}
 
+	querySQL, args, built := buildDuckDBSelect(in)
+	if !built.OK {
+		return built
+	}
+
+	rows, err := m.conn.Query(querySQL, args...)
+	if err != nil {
+		return core.Fail(core.Errorf("orm.duck.Read query: %w (sql=%s)", err, querySQL))
+	}
+	defer func() {
+		if err := rows.Close(); err != nil {
+			core.Warn("orm.duck.rows_close", "error", err)
+		}
+	}()
+
+	cols := duckSchemaFields(in.Schema)
+	scanned := scanDuckDBRows(rows, cols)
+	if !scanned.OK {
+		return scanned
+	}
+	out := scanned.Value.([]map[string]any)
+	return core.Ok(&Payload{
+		Data: out,
+		Meta: Meta{
+			Medium:   "duckdb",
+			Duration: core.Duration(time.Since(start)),
+			RowsRead: int64(len(out)),
+		},
+	})
+}
+
+// buildDuckDBSelect renders a full SELECT statement (columns, FROM,
+// PK/WHERE, ORDER BY, LIMIT/OFFSET) for a ReadIntent. Shared by the
+// top-level Read() and, recursively, by buildDuckDBFrom for Sub()
+// participants — a subquery is just another ReadIntent rendered inline as
+// a derived table.
+func buildDuckDBSelect(in ReadIntent) (string, []any, core.Result) {
 	cols := duckSchemaFields(in.Schema)
 	if len(cols) == 0 {
-		return core.Fail(core.Errorf("orm.duck.Read: schema %q has no fields", in.Schema.Name))
+		return "", nil, core.Fail(core.Errorf("orm.duck.Read: schema %q has no fields", in.Schema.Name))
+	}
+
+	fromClause, baseAlias, fromArgs, built := buildDuckDBFrom(in)
+	if !built.OK {
+		return "", nil, built
 	}
 
 	sb := core.NewBuilder()
-	args := []any{}
+	args := append([]any{}, fromArgs...)
 	sb.WriteString("SELECT ")
-	sb.WriteString(quoteCsv(cols))
-	sb.WriteString(` FROM "`)
-	sb.WriteString(in.Schema.Name)
-	sb.WriteString(`"`)
+	sb.WriteString(qualifyCsv(baseAlias, cols))
+	sb.WriteString(" FROM ")
+	sb.WriteString(fromClause)
 
 	if len(in.PK) > 0 && len(in.PK) == len(in.Schema.PK) {
 		sb.WriteString(" WHERE ")
@@ -215,9 +266,8 @@ func (m *DuckDBMedium) Read(ctx core.Context, in ReadIntent) core.Result {
 			if i > 0 {
 				sb.WriteString(" AND ")
 			}
-			sb.WriteString(`"`)
-			sb.WriteString(pk)
-			sb.WriteString(`" = ?`)
+			sb.WriteString(qualifyField(baseAlias, pk))
+			sb.WriteString(" = ?")
 			args = append(args, in.PK[i])
 		}
 	} else if len(in.Where) > 0 {
@@ -237,7 +287,7 @@ func (m *DuckDBMedium) Read(ctx core.Context, in ReadIntent) core.Result {
 			if o.Desc {
 				dir = "DESC"
 			}
-			parts = append(parts, core.Sprintf(`"%s" %s`, o.Field, dir))
+			parts = append(parts, core.Sprintf("%s %s", duckQualifyIdent(o.Field), dir))
 		}
 		sb.WriteString(core.Join(", ", parts...))
 	}
@@ -248,40 +298,79 @@ func (m *DuckDBMedium) Read(ctx core.Context, in ReadIntent) core.Result {
 		sb.WriteString(core.Sprintf(" OFFSET %d", in.Offset))
 	}
 
-	rows, err := m.conn.Query(sb.String(), args...)
-	if err != nil {
-		return core.Fail(core.Errorf("orm.duck.Read query: %w (sql=%s)", err, sb.String()))
-	}
-	defer func() {
-		if err := rows.Close(); err != nil {
-			core.Warn("orm.duck.rows_close", "error", err)
-		}
-	}()
+	return sb.String(), args, core.Ok(nil)
+}
 
-	scanned := scanDuckDBRows(rows, cols)
-	if !scanned.OK {
-		return scanned
+// buildDuckDBFrom builds the FROM clause for a ReadIntent. With no
+// From(A{}) aliasing it's the plain "schema_name" form used since v1
+// (byte-identical output — every non-aliased query is unaffected by
+// aliasing support existing at all). With aliasing active it renders each
+// declared participant — plain table, Sub() derived table — as a
+// comma-joined FROM list; predicates carry the join condition (RFC
+// §4.13's relational-algebra style: aliases declare who participates,
+// predicates declare how they relate).
+//
+// Returns the alias that corresponds to in.Schema (by matching table
+// name), used to qualify the SELECT list and PK clause so a Of[T]-typed
+// query only ever selects T's own columns even when other tables are
+// joined into the FROM list — empty when there's no aliasing, or no
+// participant maps back to in.Schema.
+//
+// JoinSpec participants with a non-inner Kind fail with
+// orm.join.unsupported — see the Caps() doc comment for why outer joins
+// aren't wired yet. This is a defence-in-depth mirror of the same check
+// dispatchRead already runs before a typed Bridge call ever reaches here;
+// it also covers direct Medium.Read callers who bypass the Bridge.
+func buildDuckDBFrom(in ReadIntent) (clause string, baseAlias string, args []any, fail core.Result) {
+	if len(in.Alias) == 0 {
+		return core.Sprintf(`"%s"`, in.Schema.Name), "", nil, core.Ok(nil)
 	}
-	out := scanned.Value.([]map[string]any)
-	return core.Ok(&Payload{
-		Data: out,
-		Meta: Meta{
-			Medium:   "duckdb",
-			Duration: core.Duration(time.Since(start)),
-			RowsRead: int64(len(out)),
-		},
-	})
+
+	keys := core.MapKeys(in.Alias)
+	core.SliceSort(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, alias := range keys {
+		participant := in.Alias[alias]
+		if aliasTableName(participant) == in.Schema.Name {
+			baseAlias = alias
+		}
+		switch v := participant.(type) {
+		case string:
+			parts = append(parts, core.Sprintf(`"%s" AS "%s"`, v, alias))
+		case JoinSpec:
+			if v.Kind != JoinInner {
+				return "", "", nil, core.Fail(ErrJoinUnsupported)
+			}
+			parts = append(parts, core.Sprintf(`"%s" AS "%s"`, v.Table, alias))
+		case SubRef:
+			subSQL, subArgs, subFail := buildDuckDBSelect(v.Builder)
+			if !subFail.OK {
+				return "", "", nil, subFail
+			}
+			parts = append(parts, core.Sprintf(`(%s) AS "%s"`, subSQL, alias))
+			args = append(args, subArgs...)
+		default:
+			return "", "", nil, core.Fail(core.NewCode("orm.input.type", "unrecognised From() participant"))
+		}
+	}
+	return core.Join(", ", parts...), baseAlias, args, core.Ok(nil)
 }
 
 func (m *DuckDBMedium) readAggregate(_ core.Context, in ReadIntent, start time.Time) core.Result {
 	op := core.Upper(in.Aggregate.Op)
+	fromClause, baseAlias, fromArgs, built := buildDuckDBFrom(in)
+	if !built.OK {
+		return built
+	}
 	expr := "*"
 	if in.Aggregate.Field != "" {
-		expr = core.Sprintf(`"%s"`, in.Aggregate.Field)
+		expr = qualifyField(baseAlias, in.Aggregate.Field)
 	}
 	sb := core.NewBuilder()
-	sb.WriteString(core.Sprintf(`SELECT %s(%s) AS agg FROM "%s"`, op, expr, in.Schema.Name))
-	args := []any{}
+	sb.WriteString(core.Sprintf("SELECT %s(%s) AS agg FROM ", op, expr))
+	sb.WriteString(fromClause)
+	args := append([]any{}, fromArgs...)
 	if len(in.Where) > 0 {
 		clause, wargs := buildDuckDBWhere(in.Where)
 		if clause != "" {
@@ -490,6 +579,41 @@ func questionPlaceholdersN(n int) string {
 	return core.Join(",", parts...)
 }
 
+// qualifyField quotes a column reference for SQL, qualifying it with the
+// given table alias when non-empty ("u"."id"), or just quoting the bare
+// column name otherwise ("id") — the pre-aliasing behaviour, so a
+// non-aliased query (alias == "") emits byte-identical SQL to before
+// From(A{}) wiring existed.
+func qualifyField(alias, field string) string {
+	if alias == "" {
+		return core.Sprintf(`"%s"`, field)
+	}
+	return core.Sprintf(`"%s"."%s"`, alias, field)
+}
+
+// qualifyCsv qualifies and comma-joins a column list for a SELECT clause.
+func qualifyCsv(alias string, cols []string) string {
+	parts := make([]string, len(cols))
+	for i, c := range cols {
+		parts[i] = qualifyField(alias, c)
+	}
+	return core.Join(", ", parts...)
+}
+
+// duckQualifyIdent quotes a WHERE/ORDER BY column reference. A plain name
+// ("email") quotes unchanged. An already alias-qualified reference
+// ("u.id", as produced by a From(A{}) query's Where("u.id", ...) or
+// Order("u.created_at", ...) calls) splits into "u"."id" so DuckDB
+// resolves it against the right FROM participant, instead of treating the
+// dot as a literal character inside one identifier (which either fails to
+// parse or silently misresolves depending on dialect).
+func duckQualifyIdent(name string) string {
+	if table, col, found := cutDotted(name); found {
+		return qualifyField(table, col)
+	}
+	return qualifyField("", name)
+}
+
 // buildDuckDBWhere translates a list of Predicate into a SQL boolean
 // expression + positional args, in emission order so the args line up
 // with the "?" placeholders that appear in the returned clause.
@@ -552,9 +676,16 @@ func buildDuckDBPredicate(p Predicate, args *[]any) string {
 	}
 
 	op := core.Lower(p.Op)
-	col := core.Sprintf(`"%s"`, p.Field)
+	col := duckQualifyIdent(p.Field)
 	switch op {
 	case "=", "!=", "<>", "<", "<=", ">", ">=":
+		if ref, isColRef := p.Value.(ColRef); isColRef {
+			// Col() names a column, not a literal — emit it as a second
+			// identifier instead of binding it as a "?" parameter. See
+			// alias.go's Col() doc comment and shape.go's matching
+			// pass-through in shapePredicateValue.
+			return core.Sprintf("%s %s %s", col, p.Op, duckQualifyIdent(ref.Name))
+		}
 		*args = append(*args, p.Value)
 		return core.Sprintf("%s %s ?", col, p.Op)
 	case "in":
