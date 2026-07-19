@@ -490,34 +490,67 @@ func questionPlaceholdersN(n int) string {
 	return core.Join(",", parts...)
 }
 
-// buildDuckDBWhere translates a list of Predicate into a SQL WHERE
-// clause + args slice. v1 supports flat predicates with all
-// operators; nested groups / OR semantics queued.
+// buildDuckDBWhere translates a list of Predicate into a SQL boolean
+// expression + positional args, in emission order so the args line up
+// with the "?" placeholders that appear in the returned clause.
 func buildDuckDBWhere(preds []Predicate) (string, []any) {
-	if len(preds) == 0 {
-		return "", nil
-	}
-	parts := make([]string, 0, len(preds))
 	args := []any{}
-	for i, p := range preds {
+	clause := buildDuckDBWhereInto(preds, &args)
+	return clause, args
+}
+
+// buildDuckDBWhereInto renders preds into a joined boolean expression,
+// appending args (in emission order) into the caller's shared slice.
+// Recursed into by buildDuckDBPredicate for a Predicate.Group — a
+// WhereGroup's parenthesised block is structurally identical to a
+// top-level Where chain (each member combines via its own OR flag), so
+// one function serves both without duplicating the joiner logic. Also
+// fixes a latent off-by-construction in the original loop, which joined
+// on "i == 0" (the predicate's position) rather than "no clause emitted
+// yet" — a dropped leading predicate left a dangling " AND "/" OR " glued
+// to the front of the next clause. Unreachable via the public Bridge API
+// today (every op it can emit now renders something), but the same
+// silent-corruption shape as the rest of this file's bugs, so fixed
+// alongside them.
+func buildDuckDBWhereInto(preds []Predicate, args *[]any) string {
+	parts := make([]string, 0, len(preds))
+	for _, p := range preds {
+		clause := buildDuckDBPredicate(p, args)
+		if clause == "" {
+			continue
+		}
+		if len(parts) == 0 {
+			parts = append(parts, clause)
+			continue
+		}
 		joiner := " AND "
 		if p.OR {
 			joiner = " OR "
 		}
-		clause := buildDuckDBPredicate(p, &args)
-		if clause == "" {
-			continue
-		}
-		if i == 0 {
-			parts = append(parts, clause)
-		} else {
-			parts = append(parts, joiner+clause)
-		}
+		parts = append(parts, joiner+clause)
 	}
-	return core.Join("", parts...), args
+	return core.Join("", parts...)
 }
 
+// buildDuckDBPredicate renders one Predicate. Operator strings match the
+// canonical vocabulary the bridge actually emits (RFC §4.2 / bridge.go /
+// shape.go): "null" / "not null" for WhereNull/WhereNotNull (NOT
+// "is null" / "is not null" — that mismatch was the root cause of Mantis
+// #45: WhereNull's clause never matched any case here, fell through to
+// the empty default, and the query came back completely unfiltered),
+// "in" / "not in", "like" / "not like", plus the comparison operators and
+// "between". A Predicate.Group (from WhereGroup) was previously
+// unhandled entirely — its own Op is always "" (WhereGroup never sets
+// one), which matched no case and silently vanished too.
 func buildDuckDBPredicate(p Predicate, args *[]any) string {
+	if len(p.Group) > 0 {
+		inner := buildDuckDBWhereInto(p.Group, args)
+		if inner == "" {
+			return ""
+		}
+		return core.Sprintf("(%s)", inner)
+	}
+
 	op := core.Lower(p.Op)
 	col := core.Sprintf(`"%s"`, p.Field)
 	switch op {
@@ -525,31 +558,59 @@ func buildDuckDBPredicate(p Predicate, args *[]any) string {
 		*args = append(*args, p.Value)
 		return core.Sprintf("%s %s ?", col, p.Op)
 	case "in":
-		values, ok := p.Value.([]any)
-		if !ok {
-			return ""
-		}
-		placeholders := questionPlaceholdersN(len(values))
-		for _, v := range values {
-			*args = append(*args, v)
-		}
-		return core.Sprintf("%s IN (%s)", col, placeholders)
+		return buildDuckDBInClause(col, p.Value, args, false)
+	case "not in":
+		return buildDuckDBInClause(col, p.Value, args, true)
 	case "like":
 		*args = append(*args, p.Value)
 		return core.Sprintf("%s LIKE ?", col)
-	case "is null":
+	case "not like":
+		*args = append(*args, p.Value)
+		return core.Sprintf("%s NOT LIKE ?", col)
+	case "null":
 		return core.Sprintf("%s IS NULL", col)
-	case "is not null":
+	case "not null":
 		return core.Sprintf("%s IS NOT NULL", col)
 	case "between":
 		values, ok := p.Value.([]any)
 		if !ok || len(values) != 2 {
-			return ""
+			return "1=0"
 		}
 		*args = append(*args, values[0], values[1])
 		return core.Sprintf("%s BETWEEN ? AND ?", col)
 	}
 	return ""
+}
+
+// buildDuckDBInClause renders IN / NOT IN. An empty value set can't be
+// written as SQL "IN ()" — invalid syntax (DuckDB included) that fails
+// the whole query at execution time rather than filtering anything — so
+// it degrades to the relational-algebra-correct constant instead: "x IN
+// ()" never matches (1=0), "x NOT IN ()" always matches (1=1). Mirrors
+// Memium's inSlice/!inSlice semantics for the empty-set case exactly
+// (memium.go's inSlice returns false against an empty target slice
+// regardless of val, so "in" matches nothing and "not in" — the negation
+// — matches everything).
+func buildDuckDBInClause(col string, value any, args *[]any, negate bool) string {
+	values, ok := value.([]any)
+	if !ok {
+		return ""
+	}
+	if len(values) == 0 {
+		if negate {
+			return "1=1"
+		}
+		return "1=0"
+	}
+	placeholders := questionPlaceholdersN(len(values))
+	for _, v := range values {
+		*args = append(*args, v)
+	}
+	verb := "IN"
+	if negate {
+		verb = "NOT IN"
+	}
+	return core.Sprintf("%s %s (%s)", col, verb, placeholders)
 }
 
 func duckDBType(t string) string {

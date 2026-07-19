@@ -263,3 +263,362 @@ func TestDuckDB_Raw_IntentInterop_Mixed(t *testing.T) {
 		t.Fatalf("intent→raw: got %q want %q", got, "beta")
 	}
 }
+
+// openTestDuckDB opens a fresh DuckDB file under a per-test temp dir and
+// registers cleanup — the setup every test above hand-rolls. Factored out
+// here since the predicate/alias regression tests below add enough of
+// them to make the duplication worth cutting (mirrors setupBridgeTest's
+// role for the Memium-backed tests in bridge_test.go).
+func openTestDuckDB(t *testing.T, name string) *DuckDBMedium {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "orm-duck-"+name+"-")
+	if err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	r := NewDuckDB(filepath.Join(dir, name+".duckdb"))
+	if !r.OK {
+		t.Fatalf("open: %v", r.Error())
+	}
+	d := r.Value.(*DuckDBMedium)
+	t.Cleanup(func() { d.Close() })
+	return d
+}
+
+// duckNullRow is the fixture model for the WhereNull/WhereNotNull/
+// WhereGroup regression tests — exercised through the real Bridge
+// (Of[T](c)...) rather than direct Medium.Read calls, since Mantis #45
+// was found in consumer use of the query builder, not of the Intent
+// shape directly.
+type duckNullRow struct {
+	ID   string
+	Name string
+}
+
+func (duckNullRow) Schema() Schema {
+	return Define(func(b *Builder) {
+		b.Name("duck_null_rows")
+		b.PK("ID")
+		b.String("ID").NotNull()
+		b.String("Name")
+	})
+}
+
+// TestDuckDB_WhereNull_Good — WhereNull("field") must return only rows
+// where the field IS NULL, on the DuckDB lane. Regression for Mantis #45:
+// buildDuckDBPredicate matched Predicate.Op against "is null" / "is not
+// null", but WhereNull/WhereNotNull (bridge.go) — and the RFC §4.2
+// operator table — actually emit "null" / "not null". The switch never
+// matched, the clause fell through to the empty default, and the query
+// came back completely unfiltered.
+func TestDuckDB_WhereNull_Good(t *testing.T) {
+	d := openTestDuckDB(t, "wherenull")
+	schema := duckNullRow{}.Schema()
+	d.RegisterTable(schema.Name, schema)
+
+	c := core.New()
+	t.Cleanup(func() { Remove(c) })
+	Mount(c, "default", d)
+
+	seed := []map[string]any{
+		{"ID": "1", "Name": "alice"},
+		{"ID": "2", "Name": nil},
+	}
+	for _, row := range seed {
+		w := d.Write(core.Background(), WriteIntent{Op: OpInsert, Schema: schema, Rows: []any{row}})
+		if !w.OK {
+			t.Fatalf("seed write %v: %v", row, w.Error())
+		}
+	}
+
+	res := Of[duckNullRow](c).WhereNull("Name").Get()
+	if !res.OK {
+		t.Fatalf("WhereNull query: %v", res.Error())
+	}
+	rows, ok := Cast[[]duckNullRow](res)
+	if !ok {
+		t.Fatalf("expected []duckNullRow, got %T", res.Value)
+	}
+	if len(rows) != 1 || rows[0].ID != "2" {
+		t.Fatalf(`WhereNull("Name") should return only the null row (id=2), got %+v`, rows)
+	}
+}
+
+// TestDuckDB_WhereNotNull_Good — the sibling of WhereNull, same root
+// cause ("not null" vs "is not null"), same fix.
+func TestDuckDB_WhereNotNull_Good(t *testing.T) {
+	d := openTestDuckDB(t, "wherenotnull")
+	schema := duckNullRow{}.Schema()
+	d.RegisterTable(schema.Name, schema)
+
+	c := core.New()
+	t.Cleanup(func() { Remove(c) })
+	Mount(c, "default", d)
+
+	seed := []map[string]any{
+		{"ID": "1", "Name": "alice"},
+		{"ID": "2", "Name": nil},
+	}
+	for _, row := range seed {
+		w := d.Write(core.Background(), WriteIntent{Op: OpInsert, Schema: schema, Rows: []any{row}})
+		if !w.OK {
+			t.Fatalf("seed write %v: %v", row, w.Error())
+		}
+	}
+
+	res := Of[duckNullRow](c).WhereNotNull("Name").Get()
+	if !res.OK {
+		t.Fatalf("WhereNotNull query: %v", res.Error())
+	}
+	rows, ok := Cast[[]duckNullRow](res)
+	if !ok {
+		t.Fatalf("expected []duckNullRow, got %T", res.Value)
+	}
+	if len(rows) != 1 || rows[0].ID != "1" {
+		t.Fatalf(`WhereNotNull("Name") should return only the non-null row (id=1), got %+v`, rows)
+	}
+}
+
+// TestDuckDB_DeleteWhereNull_Good — the WhereNull fix lives in the shared
+// buildDuckDBWhere/buildDuckDBPredicate pair, which writeUpdate/
+// writeDelete also call. Proves the blast radius: DeleteAll (and Update)
+// scoped by a null predicate were equally broken — this pins that a
+// delete now removes exactly the null-matching row, not zero rows
+// (clause silently dropped → WHERE vanishes → nothing matches TRUE AND,
+// or in DELETE's case the predicate is simply absent from the statement,
+// which for DeleteAll with ONLY a null predicate means "DELETE FROM t"
+// with no WHERE at all — every row gone).
+func TestDuckDB_DeleteWhereNull_Good(t *testing.T) {
+	d := openTestDuckDB(t, "deletewherenull")
+	schema := duckNullRow{}.Schema()
+	d.RegisterTable(schema.Name, schema)
+
+	seed := []map[string]any{
+		{"ID": "1", "Name": "alice"},
+		{"ID": "2", "Name": nil},
+	}
+	for _, row := range seed {
+		w := d.Write(core.Background(), WriteIntent{Op: OpInsert, Schema: schema, Rows: []any{row}})
+		if !w.OK {
+			t.Fatalf("seed write %v: %v", row, w.Error())
+		}
+	}
+
+	del := d.Write(core.Background(), WriteIntent{
+		Op:     OpDelete,
+		Schema: schema,
+		Where:  []Predicate{{Field: "Name", Op: "null"}},
+	})
+	if !del.OK {
+		t.Fatalf("delete: %v", del.Error())
+	}
+
+	res := d.Read(core.Background(), ReadIntent{Schema: schema, Order: []OrderBy{{Field: "ID"}}})
+	if !res.OK {
+		t.Fatalf("post-delete read: %v", res.Error())
+	}
+	rows := res.Value.(*Payload).Data.([]map[string]any)
+	if len(rows) != 1 || rows[0]["ID"] != "1" {
+		t.Fatalf("DeleteAll(WhereNull) should remove only id=2, got %v", rows)
+	}
+}
+
+// TestDuckDB_WhereGroup_Good — a WhereGroup-shaped nested OR block
+// (Predicate.Group) was completely unhandled by buildDuckDBPredicate: a
+// group predicate's own Op is always "" (WhereGroup never sets one, see
+// bridge.go), which matched no case in the switch and silently vanished
+// — the same drop pattern as WhereNull, but for a whole parenthesised
+// clause rather than one comparison. Reproduces the RFC §4.2 worked
+// example verbatim: active=true AND (tier='pro' OR admin=true).
+func TestDuckDB_WhereGroup_Good(t *testing.T) {
+	d := openTestDuckDB(t, "wheregroup")
+	schema := Define(func(b *Builder) {
+		b.Name("group_rows")
+		b.PK("id")
+		b.String("id").NotNull()
+		b.Bool("active")
+		b.String("tier")
+		b.Bool("admin")
+	})
+	d.RegisterTable("group_rows", schema)
+
+	seed := []map[string]any{
+		{"id": "1", "active": true, "tier": "pro", "admin": false},  // active AND (pro OR admin) -> match via tier
+		{"id": "2", "active": true, "tier": "free", "admin": true},  // active AND (pro OR admin) -> match via admin
+		{"id": "3", "active": true, "tier": "free", "admin": false}, // active but neither pro nor admin -> no match
+		{"id": "4", "active": false, "tier": "pro", "admin": true},  // not active -> no match regardless of group
+	}
+	for _, row := range seed {
+		w := d.Write(core.Background(), WriteIntent{Op: OpInsert, Schema: schema, Rows: []any{row}})
+		if !w.OK {
+			t.Fatalf("seed write %v: %v", row, w.Error())
+		}
+	}
+
+	res := d.Read(core.Background(), ReadIntent{
+		Schema: schema,
+		Where: []Predicate{
+			{Field: "active", Op: "=", Value: true},
+			{Group: []Predicate{
+				{Field: "tier", Op: "=", Value: "pro"},
+				{Field: "admin", Op: "=", Value: true, OR: true},
+			}},
+		},
+		Order: []OrderBy{{Field: "id"}},
+	})
+	if !res.OK {
+		t.Fatalf("grouped read: %v", res.Error())
+	}
+	rows := res.Value.(*Payload).Data.([]map[string]any)
+	if len(rows) != 2 || rows[0]["id"] != "1" || rows[1]["id"] != "2" {
+		t.Fatalf(`active=true AND (tier='pro' OR admin=true): got %v, want rows "1" and "2"`, rows)
+	}
+}
+
+// --- Neighbour audit: every other predicate/clause buildDuckDBPredicate
+// emits, pinned individually per the #45 audit requirement — "verified
+// correct" and "fixed" both get a test, not just the two named defects.
+
+// duckPredicateFixture opens a fresh DuckDB medium, registers a small
+// fixture table, and seeds three rows spanning the value ranges the
+// audit tests below exercise (equality / comparison / in / like /
+// between). Shared so each audit test only has to build and run its own
+// Predicate.
+func duckPredicateFixture(t *testing.T) (*DuckDBMedium, Schema) {
+	t.Helper()
+	d := openTestDuckDB(t, "predicates")
+	schema := Define(func(b *Builder) {
+		b.Name("pred_rows")
+		b.PK("id")
+		b.String("id").NotNull()
+		b.String("name")
+		b.Int64("score")
+	})
+	d.RegisterTable("pred_rows", schema)
+	rows := []map[string]any{
+		{"id": "a", "name": "alice", "score": int64(10)},
+		{"id": "b", "name": "bob", "score": int64(20)},
+		{"id": "c", "name": "carol", "score": int64(30)},
+	}
+	for _, row := range rows {
+		w := d.Write(core.Background(), WriteIntent{Op: OpInsert, Schema: schema, Rows: []any{row}})
+		if !w.OK {
+			t.Fatalf("seed write %v: %v", row, w.Error())
+		}
+	}
+	return d, schema
+}
+
+// duckReadIDs runs a Read with the given predicates and returns the
+// matching "id" values in ascending order.
+func duckReadIDs(t *testing.T, d *DuckDBMedium, schema Schema, where []Predicate) []string {
+	t.Helper()
+	res := d.Read(core.Background(), ReadIntent{Schema: schema, Where: where, Order: []OrderBy{{Field: "id"}}})
+	if !res.OK {
+		t.Fatalf("read: %v", res.Error())
+	}
+	rows := res.Value.(*Payload).Data.([]map[string]any)
+	ids := make([]string, len(rows))
+	for i, r := range rows {
+		ids[i] = r["id"].(string)
+	}
+	return ids
+}
+
+// TestDuckDB_WhereEquality_Good — "=" / "!=": verified correct, unchanged
+// by the #45 fix. Pinned as part of the neighbour audit.
+func TestDuckDB_WhereEquality_Good(t *testing.T) {
+	d, schema := duckPredicateFixture(t)
+	eq := duckReadIDs(t, d, schema, []Predicate{{Field: "name", Op: "=", Value: "bob"}})
+	if len(eq) != 1 || eq[0] != "b" {
+		t.Fatalf("= : got %v, want [b]", eq)
+	}
+	neq := duckReadIDs(t, d, schema, []Predicate{{Field: "name", Op: "!=", Value: "bob"}})
+	if len(neq) != 2 || neq[0] != "a" || neq[1] != "c" {
+		t.Fatalf("!= : got %v, want [a c]", neq)
+	}
+}
+
+// TestDuckDB_WhereComparison_Good — "<" "<=" ">" ">=": verified correct.
+func TestDuckDB_WhereComparison_Good(t *testing.T) {
+	d, schema := duckPredicateFixture(t)
+	gt := duckReadIDs(t, d, schema, []Predicate{{Field: "score", Op: ">", Value: int64(10)}})
+	if len(gt) != 2 || gt[0] != "b" || gt[1] != "c" {
+		t.Fatalf("> : got %v, want [b c]", gt)
+	}
+	lte := duckReadIDs(t, d, schema, []Predicate{{Field: "score", Op: "<=", Value: int64(20)}})
+	if len(lte) != 2 || lte[0] != "a" || lte[1] != "b" {
+		t.Fatalf("<= : got %v, want [a b]", lte)
+	}
+}
+
+// TestDuckDB_WhereIn_Good — "in" with a non-empty set: verified correct.
+func TestDuckDB_WhereIn_Good(t *testing.T) {
+	d, schema := duckPredicateFixture(t)
+	in := duckReadIDs(t, d, schema, []Predicate{{Field: "name", Op: "in", Value: []any{"alice", "carol"}}})
+	if len(in) != 2 || in[0] != "a" || in[1] != "c" {
+		t.Fatalf("in : got %v, want [a c]", in)
+	}
+}
+
+// TestDuckDB_WhereNotIn_Good — "not in" had no case at all in the
+// original switch (only "in" was handled) — silently dropped, same
+// failure class as WhereNull. Fixed.
+func TestDuckDB_WhereNotIn_Good(t *testing.T) {
+	d, schema := duckPredicateFixture(t)
+	notIn := duckReadIDs(t, d, schema, []Predicate{{Field: "name", Op: "not in", Value: []any{"alice", "carol"}}})
+	if len(notIn) != 1 || notIn[0] != "b" {
+		t.Fatalf("not in : got %v, want [b]", notIn)
+	}
+}
+
+// TestDuckDB_WhereInEmptySet_Bad — an empty IN set must match zero rows
+// (relational algebra: "x IN ()" is always false), not the whole table
+// and not a query-breaking SQL error. Before the fix this built literally
+// invalid SQL — `"name" IN ()` — which DuckDB rejects outright rather
+// than filtering anything. Fixed: degrades to the constant "1=0".
+func TestDuckDB_WhereInEmptySet_Bad(t *testing.T) {
+	d, schema := duckPredicateFixture(t)
+	ids := duckReadIDs(t, d, schema, []Predicate{{Field: "name", Op: "in", Value: []any{}}})
+	if len(ids) != 0 {
+		t.Fatalf("empty IN set should match zero rows, got %v", ids)
+	}
+}
+
+// TestDuckDB_WhereNotInEmptySet_Good — the mirror: an empty NOT IN set
+// excludes nothing, so it must match every row. Fixed: degrades to "1=1".
+func TestDuckDB_WhereNotInEmptySet_Good(t *testing.T) {
+	d, schema := duckPredicateFixture(t)
+	ids := duckReadIDs(t, d, schema, []Predicate{{Field: "name", Op: "not in", Value: []any{}}})
+	if len(ids) != 3 {
+		t.Fatalf("empty NOT IN set should match every row, got %v", ids)
+	}
+}
+
+// TestDuckDB_WhereLike_Good — "like": verified correct.
+func TestDuckDB_WhereLike_Good(t *testing.T) {
+	d, schema := duckPredicateFixture(t)
+	like := duckReadIDs(t, d, schema, []Predicate{{Field: "name", Op: "like", Value: "a%"}})
+	if len(like) != 1 || like[0] != "a" {
+		t.Fatalf("like : got %v, want [a]", like)
+	}
+}
+
+// TestDuckDB_WhereNotLike_Good — "not like" had no case in the original
+// switch — silently dropped. Fixed.
+func TestDuckDB_WhereNotLike_Good(t *testing.T) {
+	d, schema := duckPredicateFixture(t)
+	notLike := duckReadIDs(t, d, schema, []Predicate{{Field: "name", Op: "not like", Value: "a%"}})
+	if len(notLike) != 2 || notLike[0] != "b" || notLike[1] != "c" {
+		t.Fatalf("not like : got %v, want [b c]", notLike)
+	}
+}
+
+// TestDuckDB_WhereBetween_Good — "between": verified correct.
+func TestDuckDB_WhereBetween_Good(t *testing.T) {
+	d, schema := duckPredicateFixture(t)
+	between := duckReadIDs(t, d, schema, []Predicate{{Field: "score", Op: "between", Value: []any{int64(15), int64(25)}}})
+	if len(between) != 1 || between[0] != "b" {
+		t.Fatalf("between : got %v, want [b]", between)
+	}
+}
