@@ -3,6 +3,8 @@
 package orm
 
 import (
+	"slices"
+
 	"dappco.re/go"
 )
 
@@ -239,7 +241,7 @@ func slugify(s string) string {
 	lowered := core.Lower(s)
 	var result []byte
 	lastDash := false
-	for i := 0; i < len(lowered); i++ {
+	for i := range len(lowered) {
 		c := lowered[i]
 		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
 			result = append(result, c)
@@ -681,12 +683,7 @@ func RehydrateApply(field Field, value any) core.Result {
 // --- Helpers ---
 
 func hasConstraint(field Field, c string) bool {
-	for _, v := range field.Constraints {
-		if v == c {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(field.Constraints, c)
 }
 
 func isNilOrZero(v any) bool {

@@ -3,6 +3,8 @@
 package orm
 
 import (
+	maps0 "maps"
+
 	"dappco.re/go"
 )
 
@@ -90,9 +92,7 @@ func (m *Memium) Insert(table string, row map[string]any) {
 		m.tables = make(map[string][]map[string]any)
 	}
 	cp := make(map[string]any, len(row))
-	for k, v := range row {
-		cp[k] = v
-	}
+	maps0.Copy(cp, row)
 	m.tables[table] = append(m.tables[table], cp)
 	m.fanOut(table, WatchInsert, nil, cp)
 }
@@ -241,15 +241,11 @@ func (m *Memium) Write(ctx core.Context, in WriteIntent) core.Result {
 						before := cloneRow(existing)
 						candidate := cloneRow(existing)
 						// Update
-						for k, v := range rowMap {
-							candidate[k] = v
-						}
+						maps0.Copy(candidate, rowMap)
 						if unique := m.checkUnique(table, in.Schema, candidate, i); !unique.OK {
 							return unique
 						}
-						for k, v := range candidate {
-							m.tables[table][i][k] = v
-						}
+						maps0.Copy(m.tables[table][i], candidate)
 						m.fanOut(table, WatchUpdate, before, m.tables[table][i])
 						found = true
 						rowsWritt++
@@ -558,7 +554,7 @@ func (m *Memium) Search(ctx core.Context, in ReadIntent) core.Result {
 		}
 
 		// Sort by score descending
-		for i := 0; i < len(scoredList); i++ {
+		for i := range scoredList {
 			for j := i + 1; j < len(scoredList); j++ {
 				if scoredList[j].score > scoredList[i].score {
 					scoredList[i], scoredList[j] = scoredList[j], scoredList[i]
@@ -808,7 +804,7 @@ func matchBetween(val, target any) bool {
 
 // sortRows sorts a slice of rows (in-place) by the given orderings.
 func (m *Memium) sortRows(rows []map[string]any, order []OrderBy) {
-	for i := 0; i < len(rows); i++ {
+	for i := range rows {
 		for j := i + 1; j < len(rows); j++ {
 			if compareRows(rows[i], rows[j], order) > 0 {
 				rows[i], rows[j] = rows[j], rows[i]
@@ -1002,9 +998,7 @@ func (m *Memium) updateMatching(table string, schema Schema, where []Predicate, 
 			continue
 		}
 		candidate := cloneRow(m.tables[table][i])
-		for k, v := range updates {
-			candidate[k] = v
-		}
+		maps0.Copy(candidate, updates)
 		candidates[i] = candidate
 	}
 	if unique := m.checkUniqueBatch(table, schema, candidates); !unique.OK {
@@ -1071,9 +1065,7 @@ func cloneRow(row map[string]any) map[string]any {
 		return nil
 	}
 	out := make(map[string]any, len(row))
-	for k, v := range row {
-		out[k] = v
-	}
+	maps0.Copy(out, row)
 	return out
 }
 
@@ -1128,7 +1120,7 @@ func structToMap(s any) map[string]any {
 		return result
 	}
 	t := v.Type()
-	for i := 0; i < t.NumField(); i++ {
+	for i := range t.NumField() {
 		field := t.Field(i)
 		if !field.IsExported() {
 			continue
@@ -1146,9 +1138,7 @@ func structToMap(s any) map[string]any {
 func rowToSchemaMap(schema Schema, row any) map[string]any {
 	if m, ok := row.(map[string]any); ok {
 		out := make(map[string]any, len(m))
-		for k, v := range m {
-			out[k] = v
-		}
+		maps0.Copy(out, m)
 		return out
 	}
 	raw := structToMap(row)

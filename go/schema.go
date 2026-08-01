@@ -3,6 +3,8 @@
 package orm
 
 import (
+	"slices"
+
 	"dappco.re/go"
 )
 
@@ -232,19 +234,12 @@ func (b *Builder) fieldIndex(name string) int {
 }
 
 func hasString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, target)
 }
 
 func addFieldConstraint(field *Field, c string) {
-	for _, existing := range field.Constraints {
-		if existing == c {
-			return
-		}
+	if slices.Contains(field.Constraints, c) {
+		return
 	}
 	field.Constraints = append(field.Constraints, c)
 }
@@ -315,10 +310,8 @@ func (b *Builder) Bytes(name string) *FieldBuilder {
 // --- FieldBuilder chained modifiers ---
 
 func (fb *FieldBuilder) addConstraint(c string) {
-	for _, existing := range fb.b.current.Constraints {
-		if existing == c {
-			return
-		}
+	if slices.Contains(fb.b.current.Constraints, c) {
+		return
 	}
 	fb.b.current.Constraints = append(fb.b.current.Constraints, c)
 }

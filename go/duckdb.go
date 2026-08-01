@@ -23,6 +23,7 @@ package orm
 
 import (
 	"database/sql"
+	"slices"
 	"sync"
 	"time"
 
@@ -438,13 +439,7 @@ func (m *DuckDBMedium) writeInsert(in WriteIntent, start time.Time) core.Result 
 		if in.Op == OpSave && len(in.Schema.PK) > 0 {
 			updateClauses := make([]string, 0, len(cols))
 			for _, c := range cols {
-				skip := false
-				for _, pk := range in.Schema.PK {
-					if pk == c {
-						skip = true
-						break
-					}
-				}
+				skip := slices.Contains(in.Schema.PK, c)
 				if !skip {
 					updateClauses = append(updateClauses, core.Sprintf(`"%s" = excluded."%s"`, c, c))
 				}

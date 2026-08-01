@@ -3,6 +3,8 @@
 package orm_test
 
 import (
+	"slices"
+
 	. "dappco.re/go"
 	"dappco.re/go/orm"
 )
@@ -261,10 +263,5 @@ func TestSchema_JSONRoundTrip_Bad(t *T) {
 
 // containsConst checks if a constraint string exists in the constraints slice
 func containsConst(constraints []string, c string) bool {
-	for _, v := range constraints {
-		if v == c {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(constraints, c)
 }

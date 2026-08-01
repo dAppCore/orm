@@ -589,7 +589,7 @@ func populateStructFromRow(target any, schema Schema, row map[string]any) core.R
 	}
 	t := elem.Type()
 
-	for i := 0; i < t.NumField(); i++ {
+	for i := range t.NumField() {
 		field := t.Field(i)
 		if !field.IsExported() {
 			continue

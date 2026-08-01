@@ -200,7 +200,7 @@ func TestWatch_LiveDoesNotDropBufferedBurst_Good(t *T) {
 	AssertTrue(t, ok)
 
 	const total = 90
-	for i := 0; i < total; i++ {
+	for i := range total {
 		mem.Insert("ext_users", map[string]any{
 			"id":    int64(i + 1),
 			"name":  "burst",
@@ -270,7 +270,7 @@ func TestSchemaCache_ConcurrentFirstAccessCallsSchemaOnce_Good(t *T) {
 	countingCacheMu.Unlock()
 
 	var wg WaitGroup
-	for i := 0; i < 32; i++ {
+	for range 32 {
 		wg.Go(func() {
 			orm.Of[CountingCacheUser](c).Where("id", "=", int64(1))
 		})

@@ -128,7 +128,7 @@ func valueSlice(value any) []any {
 		return nil
 	}
 	out := make([]any, v.Len())
-	for i := 0; i < v.Len(); i++ {
+	for i := range v.Len() {
 		out[i] = v.Index(i).Interface()
 	}
 	return out
