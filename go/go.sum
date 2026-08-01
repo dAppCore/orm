@@ -1,5 +1,7 @@
 dappco.re/go v0.10.4 h1:vir5AK8AkHbTxhPUT0et6Tc0P8i/i+gLInM0LRLt1EU=
 dappco.re/go v0.10.4/go.mod h1:xapr7fLK4/9Pu2iSCr4qZuIuatmtx1j56zS/oPDbGyQ=
+dappco.re/go v0.12.0 h1:lotJop5nvhrIQ1J2L5IP37H72ihnQnIjNzFT0iMEfx0=
+dappco.re/go v0.12.0/go.mod h1:xapr7fLK4/9Pu2iSCr4qZuIuatmtx1j56zS/oPDbGyQ=
 github.com/andybalholm/brotli v1.2.0 h1:ukwgCxwYrmACq68yiUqwIWnGY0cTPox/M94sVwToPjQ=
 github.com/andybalholm/brotli v1.2.0/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/apache/arrow-go/v18 v18.5.1 h1:yaQ6zxMGgf9YCYw4/oaeOU3AULySDlAYDOcnr4LdHdI=
