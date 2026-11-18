@@ -13,11 +13,11 @@ Run it before committing and after — both runs must end "verdict: COMPLIANT"
 across ALL dimensions. Every counter must be 0.
 
 Audit dimensions (in order, all enforced by audit.sh):
- 1. legacy-imports         — `dappco.re/go/core` → `dappco.re/go`
+ 1. legacy-imports         — `github.com/dappcore/go` → `github.com/dappcore/go`
  2. banned-imports         — fmt/errors/strings/path/os/log/json/bytes in
                             ANY .go (incl. tests, _example_test.go,
                             tests/cli/*) → core wrappers via
-                            `core "dappco.re/go"` or dot-import
+                            `core "github.com/dappcore/go"` or dot-import
  3. breaking-api-sites     — core.Setenv / core.Unsetenv → Result return
  4. result-literals        — core.Result{...} → Ok / Fail / ResultOf
  5. testify-test-files     — testify → AssertX/RequireX + *T + dot-import
@@ -31,7 +31,7 @@ Audit dimensions (in order, all enforced by audit.sh):
                             is gaming and fails.
  9. example-gaps           — every public symbol has Example<Symbol> in
                             <file>_example_test.go using Println from
-                            `dappco.re/go` (NOT fmt). `// Output:` must
+                            `github.com/dappcore/go` (NOT fmt). `// Output:` must
                             match real stdout.
 10. missing-test-files     — every <file>.go with public symbols requires
                             a <file>_test.go SIBLING file. No symbol's
@@ -104,7 +104,7 @@ Audit dimensions (in order, all enforced by audit.sh):
                             and stdcompat shim packages.
 22. stdlib-name-aliases    — BANNED: any import line `<stdlib-name> "..."`
                             where the alias is a banned stdlib name. e.g.
-                            `strings "dappco.re/go/api/internal/stdcompat/corestrings"`
+                            `strings "github.com/dappcore/api/go/internal/stdcompat/corestrings"`
                             slips past banned-imports (which only checks
                             bare `"strings"`) but the call sites read as
                             `strings.Contains(...)` — functionally

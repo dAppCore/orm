@@ -5,7 +5,7 @@ package orm
 import (
 	"slices"
 
-	"dappco.re/go"
+	"github.com/dappcore/go"
 )
 
 // Shaper defines bidirectional shape enforcement — incoming values are

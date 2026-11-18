@@ -3,7 +3,7 @@
 package orm
 
 import (
-	"dappco.re/go"
+	"github.com/dappcore/go"
 )
 
 func storageFieldName(fallback, jsonTag string) (string, bool) {

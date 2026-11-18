@@ -4,7 +4,7 @@
 package orm
 
 import (
-	"dappco.re/go"
+	"github.com/dappcore/go"
 )
 
 // Of is the generic entry point for the typed fluent bridge.

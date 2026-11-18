@@ -15,7 +15,7 @@ core/orm/
 ├── README.md               ← this file
 ├── go.work                 ← Go workspace declaring orm + core/go (no `replace` directives anywhere)
 ├── externals/
-│   └── core-go/            ← bundled snapshot of dappco.re/go (the foundation framework)
+│   └── core-go/            ← bundled snapshot of github.com/dappcore/go (the foundation framework)
 └── go/                     ← Go implementation (v1 target)
     ├── go.mod
     └── *.go                ← candidate writes implementation here
@@ -25,7 +25,7 @@ PHP and TS bindings (post-v1) live in sibling `php/` and `ts/` subfolders when a
 
 ## Workspace Setup
 
-The repo ships with `go.work` at the root and a vendored snapshot of `dappco.re/go` (= core/go) under `externals/core-go/`. This means:
+The repo ships with `go.work` at the root and a vendored snapshot of `github.com/dappcore/go` (= core/go) under `externals/core-go/`. This means:
 
 - **No `replace` directives in any `go.mod`** — workspace mode resolves the dep
 - **Self-contained** — clone the repo, run `go build ./...` from `go/`, no GOPROXY required
@@ -39,12 +39,12 @@ go work sync                  # idempotent; should exit 0
 cd go && go build ./...       # builds (currently empty — populated by IMPLEMENTATION_PLAN.md phases)
 ```
 
-To run *outside* the workspace (production / CI module-mode), set `GOWORK=off` and ensure `dappco.re/go` is reachable via your GOPROXY.
+To run *outside* the workspace (production / CI module-mode), set `GOWORK=off` and ensure `github.com/dappcore/go` is reachable via your GOPROXY.
 
 ## Spec Status
 
 `RFC.md` passed Opus-class validation 2026-05-03:
-- All `core.*` references resolve to actual primitives in `dappco.re/go`
+- All `core.*` references resolve to actual primitives in `github.com/dappcore/go`
 - No undefined types
 - No banned-import violations in example code
 - 15 sections, 28 subsections, 1258 lines — self-contained per `code/` prickle convention
@@ -62,7 +62,7 @@ To run *outside* the workspace (production / CI module-mode), set `GOWORK=off` a
 ## Quick API Tour
 
 ```go
-import "dappco.re/go/orm"
+import "github.com/dappcore/orm/go"
 
 // Reads
 res := orm.Of[User](c).Find(1)

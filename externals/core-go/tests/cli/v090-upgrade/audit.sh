@@ -9,13 +9,13 @@
 # Output is structured so the codex brief can interpolate it directly.
 #
 # What this checks (the v0.9.0 PATTERN standard, derived from core/go reference):
-#   1. Module path  — every `dappco.re/go/core` import rewritten to `dappco.re/go`
+#   1. Module path  — every `github.com/dappcore/go` import rewritten to `github.com/dappcore/go`
 #   2. Breaking API — Setenv / Unsetenv / Table.Flush returning Result, not error
 #   3. Constructors — `core.Result{...}` literals replaced with Ok / Fail / ResultOf
 #   4. Tests        — testify removed in favour of core's AssertX / RequireX + *T
 #   5. AX-7         — every public symbol has Test*_{Good,Bad,Ugly} triplets
 #
-# go.mod hygiene (indirect deps, stale dappco.re/go/* entries) is intentionally
+# go.mod hygiene (indirect deps, stale github.com/dappcore/* entries) is intentionally
 # NOT counted. Those resolve themselves bottom-up as the dependency graph
 # converges — they're not the v0.9.0 idiom signal.
 #
@@ -47,7 +47,7 @@ verdict() {
 # ---------- counts ----------
 
 # 1. Legacy module path
-legacy_imports=$(grep -rln $EXCLUDE_DIRS '"dappco.re/go/core' --include="*.go" . 2>/dev/null | wc -l | tr -d ' ')
+legacy_imports=$(grep -rln $EXCLUDE_DIRS '"github.com/dappcore/go' --include="*.go" . 2>/dev/null | wc -l | tr -d ' ')
 
 # 2. Breaking-API call sites (signatures changed to Result in v0.9.0)
 breaking_api=$(grep -rEn $EXCLUDE_DIRS 'core\.(Setenv|Unsetenv)\(' --include="*.go" . 2>/dev/null | wc -l | tr -d ' ')
@@ -255,7 +255,7 @@ type_alias_dodges=$(grep -rEn $EXCLUDE_DIRS \
 #     this: codex renamed `internal/stdcompat/strings` to
 #     `internal/stdcompat/corestrings` (dodging stdlib-shadow-packages)
 #     but kept the shim and imported it with stdlib aliasing:
-#       `strings "dappco.re/go/api/internal/stdcompat/corestrings"`
+#       `strings "github.com/dappcore/api/go/internal/stdcompat/corestrings"`
 #     Tests then write `strings.Contains(...)` which resolves to the
 #     shim. Functionally identical to `import "strings"` but slips past
 #     banned-imports (which only checks bare `"strings"`).
@@ -273,7 +273,7 @@ stdlib_name_aliases=$(grep -rEn $EXCLUDE_DIRS \
 #     after stdlib-shadow-packages caught `package fmt`/`package log`/etc,
 #     codex renamed packages to `corelog`/`processexec` etc. and kept the
 #     shim files in `.compat/log/log.go` / `.compat/process/exec/exec.go`,
-#     imported as `processexec "dappco.re/go/process/exec"`. Neither
+#     imported as `processexec "github.com/dappcore/go-process/go/exec"`. Neither
 #     package name nor import alias matches stdlib, so previous dims miss.
 #     But the `.compat/` directory path itself is the smoking gun — it's
 #     been the shim hiding place across THREE consecutive gaming rounds
@@ -318,7 +318,7 @@ stdlib_shim_dirs=$(find . -type d \
 # 5w. Banned `external/<X>-shim/` directories (Round 6 gaming, 2026-05-01).
 #     go-devops mantis #1231 r1 hit COMPLIANT by creating
 #     external/go-cli-shim/ and external/go-core-shim/ — full
-#     reimplementations of dappco.re/go/cli and dappco.re/go aliases that
+#     reimplementations of github.com/dappcore/cli/go and github.com/dappcore/go aliases that
 #     import banned stdlib (fmt/os/errors/strings/io/time) but live in
 #     external/ (excluded from import scans). go.work + go.mod replace
 #     directives point at these inline shims so GOWORK=off builds resolve
@@ -414,7 +414,7 @@ cli_batch_helpers=$(
     } | grep -v '_test\.go' | wc -l | tr -d ' '
 )
 
-# 5z. Standalone i18n free-function usage in production. The dappco.re/go/i18n
+# 5z. Standalone i18n free-function usage in production. The github.com/dappcore/go-i18n/go
 #     package exposes free functions like `i18n.T(...)`, `i18n.Label(...)`,
 #     `i18n.RegisterLocales(...)`, `i18n.Title(...)` for convenience — but
 #     the canonical core/go shape is `c.I18n().Translate("key")`,
@@ -584,7 +584,7 @@ total=$((legacy_imports + banned_imports + breaking_api + result_literals + test
 cat <<REPORT
 === v0.9.0 compliance: $(basename "$(pwd)") ===
 
-  legacy-imports         $(verdict "$legacy_imports")    (dappco.re/go/core → dappco.re/go)
+  legacy-imports         $(verdict "$legacy_imports")    (github.com/dappcore/go → github.com/dappcore/go)
   banned-imports         $(verdict "$banned_imports")    (fmt/errors/strings/path/os/log/json/bytes → core wrappers; ALL .go incl tests)
   breaking-api-sites     $(verdict "$breaking_api")    (core.Setenv / core.Unsetenv → Result)
   result-literals        $(verdict "$result_literals")    (core.Result{...} → Ok / Fail / ResultOf)

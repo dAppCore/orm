@@ -1,7 +1,7 @@
 package core_test
 
 import (
-	. "dappco.re/go"
+	. "github.com/dappcore/go"
 )
 
 // --- LSPRegisterDiagnostic ---
@@ -83,7 +83,7 @@ func TestLsp_LSPComputeDiagnostics_Good(t *T) {
 import (
 	"context"
 
-	. "dappco.re/go"
+	. "github.com/dappcore/go"
 )
 `)
 	diags := LSPComputeDiagnostics("file:///homelab_test.go", content)
@@ -93,10 +93,10 @@ import (
 }
 
 func TestLsp_LSPComputeDiagnostics_Bad(t *T) {
-	// Clean test file (only dappco.re/go) produces no diagnostics.
+	// Clean test file (only github.com/dappcore/go) produces no diagnostics.
 	content := []byte(`package homelab_test
 
-import . "dappco.re/go"
+import . "github.com/dappcore/go"
 
 func TestSomething_Good(t *T) {}
 `)

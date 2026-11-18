@@ -27,7 +27,7 @@ import (
 	"sync"
 	"time"
 
-	core "dappco.re/go"
+	core "github.com/dappcore/go"
 
 	// duckdb driver — pulled in transitively by go-store via the same
 	// duckdb-go-bindings dep. Adding it here makes the Medium usable

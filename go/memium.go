@@ -5,7 +5,7 @@ package orm
 import (
 	maps0 "maps"
 
-	"dappco.re/go"
+	"github.com/dappcore/go"
 )
 
 // Memium is the in-memory test Medium implementing the full Capabilities.

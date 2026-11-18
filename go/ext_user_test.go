@@ -2,7 +2,7 @@
 
 package orm_test
 
-import "dappco.re/go/orm"
+import "github.com/dappcore/orm/go"
 
 type ExtUser struct {
 	ID    int64

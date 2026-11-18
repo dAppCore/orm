@@ -5,7 +5,7 @@ package orm
 import (
 	"slices"
 
-	"dappco.re/go"
+	"github.com/dappcore/go"
 )
 
 // OrderBy describes an ordering directive for a query.
