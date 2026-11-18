@@ -1,9 +1,9 @@
-module dappco.re/go/orm
+module github.com/dappcore/orm/go
 
 go 1.26.0
 
 require (
-	dappco.re/go v0.12.0
+	github.com/dappcore/go v0.13.0
 	github.com/duckdb/duckdb-go/v2 v2.10505.0
 )
 

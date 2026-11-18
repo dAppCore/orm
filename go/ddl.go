@@ -3,7 +3,7 @@
 package orm
 
 import (
-	"dappco.re/go"
+	"github.com/dappcore/go"
 )
 
 // Change describes an additive schema change (never destructive).

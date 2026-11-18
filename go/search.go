@@ -3,7 +3,7 @@
 package orm
 
 import (
-	"dappco.re/go"
+	"github.com/dappcore/go"
 )
 
 // Search runs a ranked search over fields the Schema declared Searchable.

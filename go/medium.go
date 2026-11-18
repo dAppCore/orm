@@ -3,7 +3,7 @@
 package orm
 
 import (
-	"dappco.re/go"
+	"github.com/dappcore/go"
 )
 
 // Medium is the seam between the bridge and a backend.

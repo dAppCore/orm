@@ -189,7 +189,7 @@ import (
 
 // REQUIRED — core/go wrappers
 import (
-    . "dappco.re/go"
+    . "github.com/dappcore/go"
 )
 // Use core.E for error construction, c.Strings()/c.Fs()/c.Process() at
 // runtime, *T as the test signature, AssertX/RequireX for assertions.
@@ -323,7 +323,7 @@ prints — simplest first so each pass narrows the surface:
 1. Module path imports → mechanical sed rewrite, `go mod tidy`
 2. Breaking-API call sites → rewrite per the `Result` template
 3. `core.Result{...}` literals → `Ok` / `Fail` / `ResultOf`
-4. testify in `*_test.go` → `*T` + `AssertX` + dot-import `dappco.re/go`
+4. testify in `*_test.go` → `*T` + `AssertX` + dot-import `github.com/dappcore/go`
 5. `_ = func()` discards → handle each per Forbidden #4 above
 6. Public-symbol triplet gaps → author missing tests in the matching
    `<source>_test.go` per the convention above
@@ -336,7 +336,7 @@ prints — simplest first so each pass narrows the surface:
 Test rules:
 
 - `package <pkg>_test` (or matching the existing convention in the file)
-- `import . "dappco.re/go"` — single dot-import; nothing else
+- `import . "github.com/dappcore/go"` — single dot-import; nothing else
 - `*T` not `*testing.T`
 - `AssertX` / `RequireX` from core
 - Fast — `t.TempDir()` for filesystem, no network, no external binaries

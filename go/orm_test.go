@@ -3,7 +3,7 @@
 package orm_test
 
 import (
-	. "dappco.re/go"
+	. "github.com/dappcore/go"
 )
 
 func TestOrm_Bootstrap_Smoke(t *T) {

@@ -5,8 +5,8 @@ package orm_test
 import (
 	"slices"
 
-	. "dappco.re/go"
-	"dappco.re/go/orm"
+	. "github.com/dappcore/go"
+	"github.com/dappcore/orm/go"
 )
 
 // Test model for schema tests

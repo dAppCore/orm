@@ -5,7 +5,7 @@ package orm
 import (
 	"testing"
 
-	core "dappco.re/go"
+	core "github.com/dappcore/go"
 )
 
 // duckAliasUser / duckAliasPost are the fixture models for the

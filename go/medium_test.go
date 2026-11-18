@@ -3,8 +3,8 @@
 package orm_test
 
 import (
-	. "dappco.re/go"
-	"dappco.re/go/orm"
+	. "github.com/dappcore/go"
+	"github.com/dappcore/orm/go"
 )
 
 // testMedium is a minimal Medium implementation for testing the contract.

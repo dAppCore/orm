@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	core "dappco.re/go"
+	core "github.com/dappcore/go"
 )
 
 // TestDuckDB_RoundTrip_Good — open a fresh DuckDB file, register a

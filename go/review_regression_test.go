@@ -3,8 +3,8 @@
 package orm_test
 
 import (
-	. "dappco.re/go"
-	"dappco.re/go/orm"
+	. "github.com/dappcore/go"
+	"github.com/dappcore/orm/go"
 )
 
 func TestBridge_DetailCarriesMeta_Good(t *T) {

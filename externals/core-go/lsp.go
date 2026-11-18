@@ -814,7 +814,7 @@ func lspStripGoSyntax(line string, inBlockComment *bool) string {
 	return string(out)
 }
 
-// lspTestImportsDiagnostic flags any non-`dappco.re/go` import in
+// lspTestImportsDiagnostic flags any non-`github.com/dappcore/go` import in
 // *_test.go and *_example_test.go files. *_internal_test.go files are
 // exempt (package core, may use any stdlib the production owner
 // imports). One diagnostic per offending import line.
@@ -838,7 +838,7 @@ func lspTestImportsDiagnostic(uri string, content []byte) []LSPDiagnostic {
 				continue
 			}
 			if HasPrefix(trimmed, "import ") {
-				if path, ok := lspExtractImportPath(trimmed); ok && path != "dappco.re/go" {
+				if path, ok := lspExtractImportPath(trimmed); ok && path != "github.com/dappcore/go" {
 					diags = append(diags, lspMakeDiagnostic(i, line, path))
 				}
 			}
@@ -853,7 +853,7 @@ func lspTestImportsDiagnostic(uri string, content []byte) []LSPDiagnostic {
 		if trimmed == "" || HasPrefix(trimmed, "//") {
 			continue
 		}
-		if path, ok := lspExtractImportPath(trimmed); ok && path != "dappco.re/go" {
+		if path, ok := lspExtractImportPath(trimmed); ok && path != "github.com/dappcore/go" {
 			diags = append(diags, lspMakeDiagnostic(i, line, path))
 		}
 	}
@@ -889,6 +889,6 @@ func lspMakeDiagnostic(lineNum int, lineText, importPath string) LSPDiagnostic {
 		Severity: LSPSeverityWarning,
 		Source:   "test-imports",
 		Code:     "test-imports.stdlib",
-		Message:  Sprintf("imports %q — test files may import only \"dappco.re/go\"; use the core wrapper instead", importPath),
+		Message:  Sprintf("imports %q — test files may import only \"github.com/dappcore/go\"; use the core wrapper instead", importPath),
 	}
 }

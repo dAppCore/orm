@@ -3,7 +3,7 @@
 package orm
 
 import (
-	"dappco.re/go"
+	"github.com/dappcore/go"
 )
 
 // schemaCaches holds per-Core schema caches — each Core instance

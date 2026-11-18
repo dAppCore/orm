@@ -3,8 +3,8 @@
 package orm_test
 
 import (
-	core "dappco.re/go"
-	"dappco.re/go/orm"
+	core "github.com/dappcore/go"
+	"github.com/dappcore/orm/go"
 )
 
 func TestWatch_InitialSnapshot_Good(t *core.T) {

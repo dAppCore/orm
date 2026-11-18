@@ -1,6 +1,6 @@
 ---
 Status: Aspirational
-module: dappco.re/go/orm
+module: github.com/dappcore/orm/go
 repo: core/orm
 lang: go
 tier: lib
@@ -21,7 +21,7 @@ tags:
 
 > An agent should be able to use this store from this document alone.
 
-**Module:** `dappco.re/go/orm`
+**Module:** `github.com/dappcore/orm/go`
 **Repository:** `core/orm`
 **Files:** ~10
 
@@ -39,7 +39,7 @@ tags:
 
 **What it is.** A small, typed, fluent surface (`orm.Of[T]()`, `orm.Save`) over a unified Medium contract. The Eloquent reading rhythm Go has been missing, in ~10 files, zero codegen, single binary.
 
-**Consumed two ways:** as a normal Go package (`import "dappco.re/go/orm"`) — the v1 form — or, in a future phase, mounted as a service inside a Conclave runtime via `c.Service("orm")`. v1 is package-form only; service-form is deferred.
+**Consumed two ways:** as a normal Go package (`import "github.com/dappcore/orm/go"`) — the v1 form — or, in a future phase, mounted as a service inside a Conclave runtime via `c.Service("orm")`. v1 is package-form only; service-form is deferred.
 
 ---
 
@@ -131,8 +131,8 @@ Schema is built fluently — same DSL shape as queries:
 package mymod
 
 import (
-    "dappco.re/go/core"
-    "dappco.re/go/orm"
+    "github.com/dappcore/go"
+    "github.com/dappcore/orm/go"
 )
 
 // User is the canonical user row.
@@ -1414,7 +1414,7 @@ func TestBridge_Find_Ugly(t *testing.T) { /* ... */ }
 
 ### 10.1 In Scope
 
-- Pkg-form consumption (`import "dappco.re/go/orm"`)
+- Pkg-form consumption (`import "github.com/dappcore/orm/go"`)
 - `orm.Of[T](c)` typed bridge with full fluent chain
 - `orm.Save / Delete / Insert / Tx` top-level helpers
 - Schema declaration via `Schema() orm.Schema` method
@@ -1500,7 +1500,7 @@ core/orm/
 └── README.md
 ```
 
-Total: ~18 source files + tests. No external dependencies beyond `dappco.re/go/core` and `dappco.re/go/io` (for the future Medium impls in sibling packages).
+Total: ~18 source files + tests. No external dependencies beyond `github.com/dappcore/go` and `github.com/dappcore/go-io/go` (for the future Medium impls in sibling packages).
 
 ---
 
@@ -1604,8 +1604,8 @@ A complete consumer scenario showing every primitive composing:
 package main
 
 import (
-    "dappco.re/go/core"
-    "dappco.re/go/orm"
+    "github.com/dappcore/go"
+    "github.com/dappcore/orm/go"
     orm_sql "dappco.re/go/orm-sql"
 )
 

@@ -3,7 +3,7 @@
 package orm
 
 import (
-	"dappco.re/go"
+	"github.com/dappcore/go"
 )
 
 // MountSchemas scans c.Data() entries under prefix, parses each JSON file
